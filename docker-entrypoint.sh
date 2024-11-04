@@ -1,17 +1,28 @@
 #!/bin/bash
 
 # Create required directories and set permissions
-mkdir -p /run/php /var/log
-touch /var/log/php-fpm-error.log
-chown -R www-data:www-data /run/php /var/log/php-fpm-error.log
+mkdir -p /run/php /var/log/nginx
+touch /var/log/php-fpm-error.log /var/log/nginx/access.log /var/log/nginx/error.log
+chown -R www-data:www-data /run/php /var/log/php-fpm-error.log /var/log/nginx
 
-# Laravel setup
+# Laravel setup with debugging
 php artisan key:generate
 php artisan migrate --force
-php artisan cache:clear
-php artisan config:clear
-php artisan route:clear   # Clear routes first
-php artisan route:cache   # Then cache routes
 
-php-fpm -D  # Start php-fpm in the background
-nginx -g 'daemon off;'  # Run nginx in the foreground
+# Clear all caches
+php artisan config:clear
+php artisan route:clear
+php artisan cache:clear
+php artisan view:clear
+
+echo "Debug: Listing all routes"
+php artisan route:list
+
+echo "Debug: Optimizing application"
+php artisan optimize
+
+# Start services
+echo "Starting PHP-FPM..."
+php-fpm -D
+echo "Starting Nginx..."
+nginx -g 'daemon off;'
