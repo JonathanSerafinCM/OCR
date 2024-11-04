@@ -8,4 +8,4 @@ Route::get('/', function () {
 });
 
 // Elimina o comenta la siguiente línea:
-// Route::post('/process-menu', [MenuOCRController::class, 'processMenu']);
+Route::post('/process-menu', [MenuOCRController::class, 'processMenu']);
