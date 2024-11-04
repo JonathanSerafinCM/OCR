@@ -144,6 +144,8 @@ return [
         App\Providers\AppServiceProvider::class,
         App\Providers\RouteServiceProvider::class,
         App\Providers\AuthServiceProvider::class, // Make sure this line exists
+        Illuminate\Translation\TranslationServiceProvider::class,
+        Illuminate\Validation\ValidationServiceProvider::class,
     ],
     
     'aliases' => [

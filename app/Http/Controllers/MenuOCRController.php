@@ -7,15 +7,23 @@ use thiagoalessio\TesseractOCR\TesseractOCR;
 use App\Models\Menu;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Validator;
 
 class MenuOCRController extends Controller
 {
     public function processMenu(Request $request)
     {
         try {
-            $request->validate([
+            $validator = Validator::make($request->all(), [
                 'menu_file' => 'required|file|mimes:jpg,png,pdf|max:10240'
             ]);
+
+            if ($validator->fails()) {
+                return response()->json([
+                    'error' => 'Validation failed',
+                    'details' => $validator->errors()
+                ], 422);
+            }
 
             Log::info('Processing menu file', ['filename' => $request->file('menu_file')->getClientOriginalName()]);
 
