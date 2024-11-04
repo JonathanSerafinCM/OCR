@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use thiagoalessio\TesseractOCR\TesseractOCR;
 use App\Models\Menu;
+use Illuminate\Support\Facades\Storage;
 
 class MenuOCRController extends Controller
 {
@@ -15,30 +16,40 @@ class MenuOCRController extends Controller
         ]);
 
         $file = $request->file('menu_file');
-        $path = $file->store('temp');
+        $path = Storage::disk('local')->putFile('temp', $file);
+        $fullPath = Storage::disk('local')->path($path);
         
         // Si es PDF, convertir a imagen
         if ($file->getClientOriginalExtension() === 'pdf') {
-            // Usar poppler-utils para convertir PDF a imagen
-            $imagePath = storage_path('app/temp/output.png');
-            exec("pdftoppm -png {$path} {$imagePath}");
-            $path = $imagePath;
+            $outputPath = Storage::disk('local')->path('temp/output');
+            exec("pdftoppm -png {$fullPath} {$outputPath}");
+            $fullPath = $outputPath . '-1.png';  // pdftoppm adds -1 for first page
         }
 
-        // Procesar con Tesseract
-        $text = (new TesseractOCR($path))
-            ->lang('spa')
-            ->run();
+        try {
+            // Procesar con Tesseract
+            $text = (new TesseractOCR($fullPath))
+                ->lang('spa')
+                ->run();
 
-        // Procesar el texto extraído
-        $menuItems = $this->parseMenuText($text);
+            // Procesar el texto extraído
+            $menuItems = $this->parseMenuText($text);
 
-        // Guardar en la base de datos
-        foreach ($menuItems as $item) {
-            Menu::create($item);
+            // Guardar en la base de datos
+            foreach ($menuItems as $item) {
+                Menu::create($item);
+            }
+
+            // Limpiar archivos temporales
+            Storage::disk('local')->delete($path);
+            if (isset($outputPath)) {
+                Storage::disk('local')->delete('temp/output-1.png');
+            }
+
+            return response()->json(['message' => 'Menu processed successfully', 'items' => count($menuItems)]);
+        } catch (\Exception $e) {
+            return response()->json(['error' => $e->getMessage()], 500);
         }
-
-        return response()->json(['message' => 'Menu processed successfully']);
     }
 
     private function parseMenuText($text)

@@ -41,7 +41,8 @@ COPY nginx.conf /etc/nginx/nginx.conf
 
 # Instalar dependencias de Composer
 RUN git config --global --add safe.directory /var/www/html \
-    && composer install --no-interaction --optimize-autoloader
+    && composer install --no-interaction --no-scripts \
+    && composer dump-autoload --optimize
 
 # Script de inicio
 COPY docker-entrypoint.sh /usr/local/bin/
@@ -49,4 +50,4 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 80
 
-ENTRYPOINT ["docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

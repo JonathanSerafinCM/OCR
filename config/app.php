@@ -138,12 +138,12 @@ return [
         Illuminate\Queue\QueueServiceProvider::class,
         Illuminate\Redis\RedisServiceProvider::class,
         Illuminate\Session\SessionServiceProvider::class,
-        Illuminate\View\ViewServiceProvider::class,  // Add this line
+        Illuminate\View\ViewServiceProvider::class,
         
         // Application Service Providers
         App\Providers\AppServiceProvider::class,
         App\Providers\RouteServiceProvider::class,
-        App\Providers\AuthServiceProvider::class,
+        App\Providers\AuthServiceProvider::class, // Make sure this line exists
     ],
     
     'aliases' => [
