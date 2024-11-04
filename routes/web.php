@@ -7,4 +7,5 @@ Route::get('/', function () {
     return view('welcome');
 });
 
-Route::post('/process-menu', [MenuOCRController::class, 'processMenu']);
+// Elimina o comenta la siguiente línea:
+// Route::post('/process-menu', [MenuOCRController::class, 'processMenu']);
