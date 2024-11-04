@@ -6,49 +6,74 @@ use Illuminate\Http\Request;
 use thiagoalessio\TesseractOCR\TesseractOCR;
 use App\Models\Menu;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Log;
 
 class MenuOCRController extends Controller
 {
     public function processMenu(Request $request)
     {
-        $request->validate([
-            'menu_file' => 'required|file|mimes:jpg,png,pdf'
-        ]);
-
-        $file = $request->file('menu_file');
-        $path = Storage::disk('local')->putFile('temp', $file);
-        $fullPath = Storage::disk('local')->path($path);
-        
-        // Si es PDF, convertir a imagen
-        if ($file->getClientOriginalExtension() === 'pdf') {
-            $outputPath = Storage::disk('local')->path('temp/output');
-            exec("pdftoppm -png {$fullPath} {$outputPath}");
-            $fullPath = $outputPath . '-1.png';  // pdftoppm adds -1 for first page
-        }
-
         try {
-            // Procesar con Tesseract
+            $request->validate([
+                'menu_file' => 'required|file|mimes:jpg,png,pdf|max:10240'
+            ]);
+
+            Log::info('Processing menu file', ['filename' => $request->file('menu_file')->getClientOriginalName()]);
+
+            $file = $request->file('menu_file');
+            $path = Storage::disk('local')->putFile('temp', $file);
+            $fullPath = Storage::disk('local')->path($path);
+            
+            if ($file->getClientOriginalExtension() === 'pdf') {
+                Log::info('Converting PDF to image');
+                $outputPath = Storage::disk('local')->path('temp/output');
+                exec("pdftoppm -png {$fullPath} {$outputPath} 2>&1", $output, $returnCode);
+                
+                if ($returnCode !== 0) {
+                    Log::error('PDF conversion failed', ['output' => $output, 'code' => $returnCode]);
+                    throw new \Exception('PDF conversion failed');
+                }
+                
+                $fullPath = $outputPath . '-1.png';
+            }
+
+            Log::info('Running OCR on file', ['path' => $fullPath]);
+            
             $text = (new TesseractOCR($fullPath))
                 ->lang('spa')
                 ->run();
 
-            // Procesar el texto extraído
+            if (empty($text)) {
+                throw new \Exception('OCR resulted in empty text');
+            }
+
+            Log::info('OCR completed, parsing text');
             $menuItems = $this->parseMenuText($text);
 
-            // Guardar en la base de datos
             foreach ($menuItems as $item) {
                 Menu::create($item);
             }
 
-            // Limpiar archivos temporales
             Storage::disk('local')->delete($path);
             if (isset($outputPath)) {
                 Storage::disk('local')->delete('temp/output-1.png');
             }
 
-            return response()->json(['message' => 'Menu processed successfully', 'items' => count($menuItems)]);
+            return response()->json([
+                'message' => 'Menu processed successfully',
+                'items' => count($menuItems),
+                'text' => $text // Debug only, remove in production
+            ]);
+            
         } catch (\Exception $e) {
-            return response()->json(['error' => $e->getMessage()], 500);
+            Log::error('Menu processing failed', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            return response()->json([
+                'error' => $e->getMessage(),
+                'details' => app()->environment('local') ? $e->getTraceAsString() : null
+            ], 500);
         }
     }
 
