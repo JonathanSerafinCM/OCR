@@ -28,7 +28,7 @@ RUN mkdir -p /run/php && \
     chown www-data:www-data /run/php
 
 # Copy PHP-FPM configuration
-COPY php-fpm.conf /usr/local/etc/php-fpm.d/www.conf
+COPY php-fpm.conf /usr/local/etc/php-fpm.d/zz-docker.conf
 
 # Configurar permisos
 RUN chown -R www-data:www-data /var/www/html \
