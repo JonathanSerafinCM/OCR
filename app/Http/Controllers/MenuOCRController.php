@@ -8,9 +8,17 @@ use App\Models\Menu;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
+use OpenAI;
 
 class MenuOCRController extends Controller
 {
+    private $openai;
+
+    public function __construct()
+    {
+        $this->openai = OpenAI::client(config('services.openai.api_key'));
+    }
+
     public function processMenu(Request $request)
     {
         try {
@@ -87,18 +95,56 @@ class MenuOCRController extends Controller
 
     private function parseMenuText($text)
     {
+        try {
+            $response = $this->openai->chat()->create([
+                'model' => 'gpt-3.5-turbo',
+                'messages' => [
+                    [
+                        'role' => 'system',
+                        'content' => 'You are a helpful assistant that processes restaurant menu text and returns it in a structured format. Extract dishes with their categories, names, prices, and generate appealing descriptions.'
+                    ],
+                    [
+                        'role' => 'user',
+                        'content' => "Please analyze this menu text and return a JSON array where each item has: category, dish_name, price, and description. Generate an appetizing description for each dish: \n\n" . $text
+                    ]
+                ],
+                'temperature' => 0.7,
+            ]);
+
+            $content = $response->choices[0]->message->content;
+            $menuItems = json_decode($content, true);
+
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                Log::error('Failed to parse OpenAI response', ['content' => $content]);
+                throw new \Exception('Failed to parse menu structure');
+            }
+
+            return $menuItems;
+
+        } catch (\Exception $e) {
+            Log::error('OpenAI processing failed', [
+                'error' => $e->getMessage(),
+                'text' => $text
+            ]);
+            
+            // Fallback to original parsing if AI fails
+            return $this->legacyParseMenuText($text);
+        }
+    }
+
+    private function legacyParseMenuText($text)
+    {
+        // Move the original parsing logic here as fallback
         $items = [];
         $lines = explode("\n", $text);
         $currentCategory = '';
         
         foreach ($lines as $line) {
-            // Detectar categorías (generalmente en mayúsculas)
             if (preg_match('/^[A-ZÁÉÍÓÚÑ\s]{3,}$/', trim($line))) {
                 $currentCategory = trim($line);
                 continue;
             }
 
-            // Detectar platos y precios
             if (preg_match('/^(.+?)\s*(\d{1,3}(?:,\d{2})?(?:\.\d{2})?)\s*€?$/', $line, $matches)) {
                 $items[] = [
                     'category' => $currentCategory,

@@ -23,14 +23,8 @@ php artisan route:clear
 php artisan cache:clear
 php artisan view:clear
 
-echo "Debug: Listing all routes"
-php artisan route:list
+# Start PHP-FPM
+php-fpm -D
 
-echo "Debug: Optimizing application"
-php artisan optimize
-
-# Start services
-echo "Starting PHP-FPM..."
-php-fpm &
-echo "Starting Nginx..."
-nginx -g 'daemon off;'
+# Start Nginx
+nginx -g "daemon off;"

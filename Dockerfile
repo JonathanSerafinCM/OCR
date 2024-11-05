@@ -14,7 +14,8 @@ RUN apt-get update && apt-get install -y \
     git \
     unzip \
     libzip-dev \
-    default-mysql-client
+    default-mysql-client \
+    dos2unix
 
 # Instalar extensiones PHP
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
@@ -30,23 +31,27 @@ RUN mkdir -p /run/php && \
 # Copy PHP-FPM configuration
 COPY php-fpm.conf /usr/local/etc/php-fpm.d/zz-docker.conf
 
-# Configurar permisos
-RUN chown -R www-data:www-data /var/www/html \
-    && chmod -R 755 /var/www/html \
-    && usermod -u 1000 www-data
+# Copy composer files first
+COPY composer.json composer.lock ./ 
+
+# Set proper permissions and install dependencies
+ENV COMPOSER_ALLOW_SUPERUSER=1
+RUN composer install --no-scripts --no-autoloader
 
 # Copiar archivos de la aplicación
 COPY . .
-COPY nginx.conf /etc/nginx/nginx.conf
 
-# Instalar dependencias de Composer
-RUN git config --global --add safe.directory /var/www/html \
-    && composer install --no-interaction --no-scripts \
+# Configurar permisos y finalizar Composer
+RUN chown -R www-data:www-data /var/www/html \
+    && chmod -R 755 /var/www/html \
     && composer dump-autoload --optimize
 
-# Script de inicio
-COPY docker-entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+COPY nginx.conf /etc/nginx/nginx.conf
+
+EXPOSE 80
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+
 
 EXPOSE 80
 
