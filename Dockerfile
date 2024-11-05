@@ -38,6 +38,11 @@ COPY composer.json composer.lock ./
 ENV COMPOSER_ALLOW_SUPERUSER=1
 RUN composer install --no-scripts --no-autoloader
 
+# Copy entrypoint script first and set permissions
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh && \
+    dos2unix /usr/local/bin/docker-entrypoint.sh
+
 # Copiar archivos de la aplicación
 COPY . .
 
@@ -47,11 +52,6 @@ RUN chown -R www-data:www-data /var/www/html \
     && composer dump-autoload --optimize
 
 COPY nginx.conf /etc/nginx/nginx.conf
-
-EXPOSE 80
-
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-
 
 EXPOSE 80
 
