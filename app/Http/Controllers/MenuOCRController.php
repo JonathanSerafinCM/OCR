@@ -85,12 +85,12 @@ class MenuOCRController extends Controller
             
         } catch (\Exception $e) {
             Log::error('Menu processing failed', [
-                'error' => $e->getMessage(),
+                'error' => 'Error al procesar el menú: ' . $e->getMessage(),
                 'trace' => $e->getTraceAsString()
             ]);
             
             return response()->json([
-                'error' => $e->getMessage(),
+                'error' => 'Error al procesar el menú: ' . $e->getMessage(),
                 'details' => app()->environment('local') ? $e->getTraceAsString() : null
             ], 500);
         }
@@ -128,23 +128,35 @@ class MenuOCRController extends Controller
                         ],
                         [
                             'role' => 'user',
-                            'content' => "Analiza este menú y devuelve un JSON. Ejemplo del formato esperado:
-                        {
-                            \"categories\": [
-                                {
-                                    \"name\": \"ENTRANTES\",
-                                    \"dishes\": [
-                                        {
-                                            \"name\": \"Patatas Bravas\",
-                                            \"price\": 6.50,
-                                            \"description\": \"Crujientes patatas con salsa brava casera\"
-                                        }
-                                    ]
-                                }
-                            ]
-                        }
+                            'content' => "Analiza este menú y devuelve un JSON con la siguiente estructura:
 
-                        Menú a analizar:\n{$cleanedText}"
+{
+    \"categories\": [
+        {
+            \"name\": \"Nombre de la categoría\",
+            \"dishes\": [
+                {
+                    \"name\": \"Nombre del plato\",
+                    \"price\": \"Precio o rango de precios\",
+                    \"description\": \"Descripción del plato\",
+                    \"special_notes\": \"Notas especiales\"
+                }
+            ]
+        }
+    ]
+}
+
+Consideraciones:
+
+- Los precios pueden tener formatos complejos como rangos ('10-15€'), descuentos o ofertas especiales. Incluye el formato original en el campo 'price'.
+
+- Intenta extraer las descripciones de los platos, incluso si son breves.
+
+- Identifica y captura cualquier nota especial que aparezca en los platos en 'special_notes'.
+
+- Las categorías pueden no seguir el formato esperado; detecciónalas lo mejor posible.
+
+Menú a analizar:\n{$cleanedText}"
                         ]
                     ],
                     'temperature' => 0.5,
@@ -160,7 +172,7 @@ class MenuOCRController extends Controller
                 // Verificar si el contenido parece JSON válido
                 if (!str_starts_with(trim($content), '{')) {
                     Log::error('OpenAI response is not JSON:', ['content' => $content]);
-                    throw new \Exception('OpenAI response is not in JSON format');
+                    throw new \Exception('La respuesta de OpenAI no está en formato JSON');
                 }
 
                 $menuData = json_decode($content, true);
@@ -173,12 +185,27 @@ class MenuOCRController extends Controller
                         'error' => json_last_error_msg(),
                         'content' => $content
                     ]);
-                    throw new \Exception('Failed to parse JSON: ' . json_last_error_msg());
+                    throw new \Exception('Error al parsear JSON: ' . json_last_error_msg());
                 }
 
-                if (!isset($menuData['categories']) || empty($menuData['categories'])) {
-                    Log::error('Missing or empty categories:', ['data' => $menuData]);
-                    throw new \Exception('Invalid menu structure: missing categories');
+                // Validación exhaustiva de la estructura JSON
+                if (!isset($menuData['categories']) || !is_array($menuData['categories'])) {
+                    Log::error('Invalid JSON structure: Missing or invalid "categories"');
+                    throw new \Exception('Estructura JSON inválida: falta "categories" o no es un arreglo');
+                }
+
+                foreach ($menuData['categories'] as $category) {
+                    if (!isset($category['name']) || !isset($category['dishes']) || !is_array($category['dishes'])) {
+                        Log::error('Invalid category structure', ['category' => $category]);
+                        throw new \Exception('Estructura de categoría inválida');
+                    }
+
+                    foreach ($category['dishes'] as $dish) {
+                        if (!isset($dish['name']) || !isset($dish['price'])) {
+                            Log::error('Invalid dish structure', ['dish' => $dish]);
+                            throw new \Exception('Estructura de plato inválida');
+                        }
+                    }
                 }
 
                 // Convertir la estructura al formato de la base de datos
@@ -188,9 +215,9 @@ class MenuOCRController extends Controller
                         $menuItems[] = [
                             'category' => $category['name'],
                             'dish_name' => $dish['name'],
-                            'price' => floatval(str_replace(',', '.', $dish['price'])),
-                            'description' => $dish['description'],
-                            'special_notes' => ''
+                            'price' => $dish['price'],
+                            'description' => $dish['description'] ?? '',
+                            'special_notes' => $dish['special_notes'] ?? ''
                         ];
                     }
                 }
