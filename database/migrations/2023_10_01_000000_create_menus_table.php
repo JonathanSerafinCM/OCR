@@ -17,6 +17,10 @@ class CreateMenusTable extends Migration
             $table->text('special_notes')->nullable();
             $table->timestamps();
         });
+
+        Schema::table('menus', function (Blueprint $table) {
+            $table->string('price')->change();
+        });
     }
 
     public function down()

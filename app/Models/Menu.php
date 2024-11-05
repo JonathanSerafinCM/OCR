@@ -11,9 +11,12 @@ class Menu extends Model
 
     protected $fillable = [
         'category',
+        'subcategory',
         'dish_name',
         'price',
         'description',
-        'special_notes'
+        'special_notes',
+        'discount',
+        'additional_details'
     ];
 }
