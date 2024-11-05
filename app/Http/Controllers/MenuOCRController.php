@@ -132,149 +132,175 @@ class MenuOCRController extends Controller
         return $text;
     }
 
+    private function preprocessMenuText($text)
+    {
+        $lines = explode("\n", $text);
+        $newLines = [];
+        $previousLine = '';
+
+        foreach ($lines as $line) {
+            $trimmedLine = trim($line);
+
+            // 1. Eliminar líneas sin letras o cortas
+            if (!preg_match('/[a-zA-ZáéíóúÁÉÍÓÚñÑ]/u', $trimmedLine) || strlen($trimmedLine) <= 2) {
+                continue;
+            }
+
+            // 2. Unir líneas que pertenecen al mismo plato
+            $shouldMerge = false;
+            if (!empty($previousLine)) {
+                $shouldMerge =
+                    preg_match('/^[\p{Ll}\p{P}\s»]/u', $trimmedLine) || // Empieza con minúscula, símbolo o »
+                    preg_match('/[,;]\s*$/u', $previousLine) ||        // La línea anterior termina en coma o punto y coma
+                    !preg_match('/[.!?]\s*$/u', $previousLine) ||       // La línea anterior no termina en puntuación final
+                    !preg_match('/[A-ZÁÉÍÓÚÑ]/u', $trimmedLine) ||        // No tiene mayúsculas (probablemente continuación)
+                    preg_match('/^(?:con|y|de|del|la|las|los|el|en|al|por)\s/i', $trimmedLine); // Empieza con conectores comunes
+
+                if (!preg_match('/\d+(?:[.,]\d{2})?\s*(?:€|EUR)/u', $trimmedLine) && 
+                    preg_match('/\d+(?:[.,]\d{2})?\s*(?:€|EUR)/u', $previousLine) && 
+                    $shouldMerge) {
+                    $shouldMerge = false; //Evita unir precios separados
+                }
+
+                if ($shouldMerge) {
+                    $newLines[count($newLines) - 1] .= ' ' . $trimmedLine;
+                    $previousLine = $newLines[count($newLines) - 1];
+                    continue;
+                }
+            }
+
+            $newLines[] = $trimmedLine;
+            $previousLine = $trimmedLine;
+        }
+
+        return implode("\n", $newLines);
+    }
+
     private function parseMenuText($text)
     {
         try {
-            // Debug del texto limpio
             $cleanedText = $this->cleanMenuText($text);
-            Log::debug('Cleaned text before OpenAI:', ['text' => $cleanedText]);
+            $preprocessedText = $this->preprocessMenuText($cleanedText);
             
-            // Verificar la API key
-            Log::debug('OpenAI API Key:', ['key' => substr(config('services.openai.api_key'), 0, 10) . '...']);
+            // Split menu into categories
+            $categories = $this->splitMenuIntoCategories($preprocessedText);
+            
+            $allResults = [
+                'categories' => [],
+                'general_notes' => ''
+            ];
 
-            // Construir el prompt actualizado
-            $prompt = $this->buildOpenAIPrompt($cleanedText);
-
-            try {
-                $response = $this->openai->chat()->create([
-                    'model' => 'gpt-3.5-turbo-16k',
-                    'messages' => [
-                        [
-                            'role' => 'system',
-                            'content' => 'Eres un experto chef analizando menús de restaurantes.'
-                        ],
-                        [
-                            'role' => 'user',
-                            'content' => $prompt
-                        ]
-                    ],
-                    'temperature' => 0.5,
-                    'max_tokens' => 3000
-                ]);
-
-                // Debug de la respuesta completa de OpenAI
-                Log::debug('OpenAI Raw Response:', ['response' => $response]);
+            // Process each category separately
+            foreach ($categories as $categoryName => $categoryContent) {
+                $categoryPrompt = $this->buildOpenAIPrompt($categoryContent);
+                $categoryResult = $this->processWithOpenAI($categoryPrompt);
                 
-                $content = $response->choices[0]->message->content;
-                Log::debug('OpenAI Content:', ['content' => $content]);
-                
-                // Validación con JSON Schema
-                $validator = new JsonSchemaValidator();
-                $schema = json_decode(file_get_contents(resource_path('schemas/menu_schema.json')));
-                $data = json_decode($content);
-
-                $validator->validate($data, $schema);
-
-                if ($validator->isValid()) {
-                    // Convertir la estructura al formato de la base de datos
-                    if (isset($data->categories)) {
-                        foreach ($data->categories as $category) {
-                            foreach ($category->subcategories as $subcategory) {
-                                foreach ($subcategory->dishes as $dish) {
-                                    $menuItem = [
-                                        'category' => $category->name ?? 'Sin categoría',
-                                        'subcategory' => $subcategory->name ?? null,
-                                        'dish_name' => $dish->name ?? '',
-                                        'price' => $dish->price ?? 0,
-                                        'description' => $dish->description ?? '',
-                                        'special_notes' => $dish->special_notes ?? '',
-                                        'discount' => $dish->discount ?? null,
-                                        'additional_details' => $dish->additional_details ?? null
-                                    ];
-                                    Menu::create($menuItem);
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    Log::error('Invalid JSON Schema', ['errors' => $validator->getErrors()]);
-                    throw new \Exception('Error de esquema JSON');
+                if (isset($categoryResult->categories[0])) {
+                    $allResults['categories'][] = $categoryResult->categories[0];
                 }
-
-                return [
-                    'message' => 'Menu procesado exitosamente',
-                    'items_count' => count($data->categories ?? []),
-                    'menu' => $data->general_notes ?? null,
-                    'general_notes' => $data->general_notes ?? null,
-                    'raw_text' => app()->environment('local') ? $text : null
-                ];
-
-            } catch (\OpenAI\Exceptions\ApiException $e) {
-                // Log del error y fallback al legacy parser
-                Log::error('OpenAI API Error', ['error' => $e->getMessage()]);
-                return $this->useLegacyParser($text);
-            } catch (\Throwable $e) {
-                Log::error('Menu parsing failed', ['error' => $e->getMessage()]);
-                return $this->useLegacyParser($text);
             }
+
+            return [
+                'structured_menu' => $allResults,
+                'items' => $this->convertToItems($allResults)
+            ];
 
         } catch (\Exception $e) {
             Log::error('Menu parsing failed:', [
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString()
             ]);
-            
-            // Intentar usar el parser legacy
             return $this->useLegacyParser($text);
         }
+    }
+
+    private function splitMenuIntoCategories($text)
+    {
+        $lines = explode("\n", $text);
+        $categories = [];
+        $currentCategory = 'General';
+        $currentContent = '';
+
+        foreach ($lines as $line) {
+            if (preg_match('/^---\s*(.+?)\s*---$/', $line, $matches)) {
+                if (!empty($currentContent)) {
+                    $categories[$currentCategory] = trim($currentContent);
+                }
+                $currentCategory = $matches[1];
+                $currentContent = '';
+            } else {
+                $currentContent .= $line . "\n";
+            }
+        }
+
+        if (!empty($currentContent)) {
+            $categories[$currentCategory] = trim($currentContent);
+        }
+
+        return $categories;
+    }
+
+    private function processWithOpenAI($prompt)
+    {
+        $response = $this->openai->chat()->create([
+            'model' => 'gpt-3.5-turbo-16k',
+            'messages' => [
+                [
+                    'role' => 'system',
+                    'content' => 'Eres un experto chef analizando menús de restaurantes.'
+                ],
+                [
+                    'role' => 'user',
+                    'content' => $prompt
+                ]
+            ],
+            'temperature' => 0.5,
+            'max_tokens' => 3000
+        ]);
+
+        return json_decode($response->choices[0]->message->content);
     }
 
     private function buildOpenAIPrompt(string $menuText): string
     {
         $prompt = <<<EOT
-        Eres un experto en análisis de menús de restaurantes. Tu tarea es analizar el texto de un menú y extraer la información de cada plato, incluyendo nombre, precio, descripción, etc. Si encuentras un precio en un rango, usa el precio más alto del rango. Debes devolver la información en formato JSON.
+        Eres un experto en análisis de menús de restaurantes. Extrae cada plato, su precio y descripción (generada de acuerdo al nombre del platillo). 
+        Crea descripciones cortas si no existen. Los nombres de platos pueden ser largos. 
+        Si un plato no tiene descripción, genera una corta basada en su nombre.
 
         **Formato JSON:**
-
         {
           "categories": [
             {
               "name": "Nombre de la categoría",
               "subcategories": [
                 {
-                  "name": "Nombre de la subcategoría",
+                  "name": "Nombre de la subcategoría (opcional)",
                   "dishes": [
                     {
-                      "name": "Nombre del plato",
-                      "price": "Precio",
-                      "description": "Descripción",
-                      "special_notes": "Notas especiales",
-                      "discount": "Descuento",
-                      "additional_details": "Detalles adicionales"
+                      "name": "Nombre completo del plato (puede ser largo)",
+                      "price": "Precio del plato",
+                      "description": "Descripción del plato (generada)",
+                      "special_notes": "Notas especiales (opcional)",
+                      "discount": "Descuento (opcional)",
+                      "additional_details": "Información adicional (opcional)"
                     }
                   ]
                 }
               ]
             }
           ],
-          "general_notes": "Notas generales del menú"
+          "general_notes": "Notas generales del menú (opcional)"
         }
 
         **Ejemplos:**
 
-        --- Entrantes ---
-        Ensalada César 8.50
-        Lechuga romana, pollo, crutones, queso parmesano
+        --- Tapas ---
+        Patatas bravas con alioli y salsa picante - 7.50
+        Patatas fritas crujientes con dos salsas caseras.
 
-        Sopa de tomate 5.00
-        Tomates frescos, albahaca
-
-        --- Platos principales ---
-        Pasta Carbonara 12.00
-        Spaghetti, panceta, huevo, queso pecorino
-
-        Pizza Margarita 10.00
-        Salsa de tomate, mozzarella, albahaca
+        Croquetas de jamón ibérico con reducción de Pedro Ximénez - 9.00
+        Crujientes por fuera, cremosas por dentro, con un toque dulce.
 
         **Menú a analizar:**
 
@@ -337,7 +363,7 @@ class MenuOCRController extends Controller
         
         // Patrones mejorados para detectar categorías y platos
         $categoryPattern = '/^[A-ZÁÉÍÓÚÑ\s]{3,}$/u';
-        $dishPattern = '/^(.+?)\s+(\d+(?:[.,]\d{2})?\s*(?:€|USD|[\p{Sc}])?)(?:\s*-\s*(\d+(?:[.,]\d{2})?\s*(?:€|USD|[\p{Sc}])?))?/iu';
+        $dishPattern = '/^(.+?)\s+(\d+(?:[.,]\d{2})?\s*(?:€|USD|[\p{Sc}]|EUR)?)(?:\s*-\s*(\d+(?:[.,]\d{2})?\s*(?:€|USD|[\p{Sc}]|EUR)?))?/iu';
         
         for ($index = 0; $index < count($lines); $index++) {
             $trimmedLine = trim($lines[$index]);
