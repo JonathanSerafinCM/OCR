@@ -63,10 +63,12 @@ class MenuOCRController extends Controller
             }
 
             Log::info('OCR completed, parsing text');
-            $menuItems = $this->parseMenuText($text);
+            $menuData = $this->parseMenuText($text);
 
-            foreach ($menuItems as $item) {
-                Menu::create($item);
+            if (isset($menuData['items'])) {
+                foreach ($menuData['items'] as $item) {
+                    Menu::create($item);
+                }
             }
 
             Storage::disk('local')->delete($path);
@@ -75,9 +77,10 @@ class MenuOCRController extends Controller
             }
 
             return response()->json([
-                'message' => 'Menu processed successfully',
-                'items' => count($menuItems),
-                'text' => $text // Debug only, remove in production
+                'message' => 'Menu procesado exitosamente',
+                'items_count' => count($menuData['items'] ?? []),
+                'menu' => $menuData['structured_menu'] ?? null,
+                'raw_text' => app()->environment('local') ? $text : null
             ]);
             
         } catch (\Exception $e) {
@@ -93,43 +96,166 @@ class MenuOCRController extends Controller
         }
     }
 
+    private function cleanMenuText($text) {
+        // Eliminar caracteres especiales y números al inicio de las líneas
+        $text = preg_replace('/^[\d»\*\s]+/m', '', $text);
+        // Eliminar caracteres especiales al final de las líneas
+        $text = preg_replace('/_+\s*$|Q\s*\/|\(\s*Y\s*\)/m', '', $text);
+        // Normalizar precios
+        $text = preg_replace('/(\d+)[.,](\d{2})\s*€?/', '$1.$2', $text);
+        // Limpiar líneas vacías múltiples
+        $text = preg_replace('/\n{3,}/', "\n\n", $text);
+        return $text;
+    }
+
     private function parseMenuText($text)
     {
         try {
-            $response = $this->openai->chat()->create([
-                'model' => 'gpt-3.5-turbo',
-                'messages' => [
-                    [
-                        'role' => 'system',
-                        'content' => 'You are a helpful assistant that processes restaurant menu text and returns it in a structured format. Extract dishes with their categories, names, prices, and generate appealing descriptions.'
+            // Debug del texto limpio
+            $cleanedText = $this->cleanMenuText($text);
+            Log::debug('Cleaned text before OpenAI:', ['text' => $cleanedText]);
+            
+            // Verificar la API key
+            Log::debug('OpenAI API Key:', ['key' => substr(config('services.openai.api_key'), 0, 10) . '...']);
+
+            try {
+                $response = $this->openai->chat()->create([
+                    'model' => 'gpt-3.5-turbo-16k',
+                    'messages' => [
+                        [
+                            'role' => 'system',
+                            'content' => 'Eres un experto chef analizando menús de restaurantes.'
+                        ],
+                        [
+                            'role' => 'user',
+                            'content' => "Analiza este menú y devuelve un JSON. Ejemplo del formato esperado:
+                        {
+                            \"categories\": [
+                                {
+                                    \"name\": \"ENTRANTES\",
+                                    \"dishes\": [
+                                        {
+                                            \"name\": \"Patatas Bravas\",
+                                            \"price\": 6.50,
+                                            \"description\": \"Crujientes patatas con salsa brava casera\"
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+
+                        Menú a analizar:\n{$cleanedText}"
+                        ]
                     ],
-                    [
-                        'role' => 'user',
-                        'content' => "Please analyze this menu text and return a JSON array where each item has: category, dish_name, price, and description. Generate an appetizing description for each dish: \n\n" . $text
-                    ]
-                ],
-                'temperature' => 0.7,
-            ]);
+                    'temperature' => 0.5,
+                    'max_tokens' => 2000
+                ]);
 
-            $content = $response->choices[0]->message->content;
-            $menuItems = json_decode($content, true);
+                // Debug de la respuesta completa de OpenAI
+                Log::debug('OpenAI Raw Response:', ['response' => $response]);
+                
+                $content = $response->choices[0]->message->content;
+                Log::debug('OpenAI Content:', ['content' => $content]);
+                
+                // Verificar si el contenido parece JSON válido
+                if (!str_starts_with(trim($content), '{')) {
+                    Log::error('OpenAI response is not JSON:', ['content' => $content]);
+                    throw new \Exception('OpenAI response is not in JSON format');
+                }
 
-            if (json_last_error() !== JSON_ERROR_NONE) {
-                Log::error('Failed to parse OpenAI response', ['content' => $content]);
-                throw new \Exception('Failed to parse menu structure');
+                $menuData = json_decode($content, true);
+                
+                // Debug del JSON decodificado
+                Log::debug('Decoded JSON:', ['data' => $menuData]);
+
+                if (json_last_error() !== JSON_ERROR_NONE) {
+                    Log::error('JSON decode error:', [
+                        'error' => json_last_error_msg(),
+                        'content' => $content
+                    ]);
+                    throw new \Exception('Failed to parse JSON: ' . json_last_error_msg());
+                }
+
+                if (!isset($menuData['categories']) || empty($menuData['categories'])) {
+                    Log::error('Missing or empty categories:', ['data' => $menuData]);
+                    throw new \Exception('Invalid menu structure: missing categories');
+                }
+
+                // Convertir la estructura al formato de la base de datos
+                $menuItems = [];
+                foreach ($menuData['categories'] as $category) {
+                    foreach ($category['dishes'] as $dish) {
+                        $menuItems[] = [
+                            'category' => $category['name'],
+                            'dish_name' => $dish['name'],
+                            'price' => floatval(str_replace(',', '.', $dish['price'])),
+                            'description' => $dish['description'],
+                            'special_notes' => ''
+                        ];
+                    }
+                }
+
+                return [
+                    'structured_menu' => $menuData,
+                    'items' => $menuItems
+                ];
+
+            } catch (\Exception $e) {
+                Log::error('OpenAI API error:', [
+                    'message' => $e->getMessage(),
+                    'trace' => $e->getTraceAsString()
+                ]);
+                throw $e;
             }
 
-            return $menuItems;
-
         } catch (\Exception $e) {
-            Log::error('OpenAI processing failed', [
+            Log::error('Menu parsing failed:', [
                 'error' => $e->getMessage(),
-                'text' => $text
+                'trace' => $e->getTraceAsString()
             ]);
             
-            // Fallback to original parsing if AI fails
-            return $this->legacyParseMenuText($text);
+            // Intentar usar el parser legacy
+            return $this->useLegacyParser($text);
         }
+    }
+
+    private function useLegacyParser($text)
+    {
+        Log::info('Falling back to legacy parser');
+        $legacyItems = $this->legacyParseMenuText($text);
+        
+        // Debug de items encontrados
+        Log::debug('Legacy parser results:', ['items' => $legacyItems]);
+        
+        // Convertir al nuevo formato
+        $structuredMenu = [
+            'categories' => []
+        ];
+        
+        $categorizedItems = [];
+        foreach ($legacyItems as $item) {
+            $category = $item['category'] ?: 'OTROS';
+            if (!isset($categorizedItems[$category])) {
+                $categorizedItems[$category] = [];
+            }
+            $categorizedItems[$category][] = [
+                'name' => $item['dish_name'],
+                'price' => $item['price'],
+                'description' => $item['description'] ?: 'Plato tradicional de nuestra carta'
+            ];
+        }
+        
+        foreach ($categorizedItems as $categoryName => $dishes) {
+            $structuredMenu['categories'][] = [
+                'name' => $categoryName,
+                'dishes' => $dishes
+            ];
+        }
+
+        return [
+            'structured_menu' => $structuredMenu,
+            'items' => $legacyItems
+        ];
     }
 
     private function legacyParseMenuText($text)

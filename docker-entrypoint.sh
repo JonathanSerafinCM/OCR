@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e
+
 # Create required directories and set permissions
 mkdir -p /run/php /var/log/nginx
 touch /var/log/php-fpm-error.log /var/log/nginx/access.log /var/log/nginx/error.log
@@ -15,6 +17,8 @@ chmod -R 775 /var/www/html/storage
 
 # Laravel setup with debugging
 php artisan key:generate --no-interaction
+
+# Ejecutar migraciones
 php artisan migrate --force
 
 # Clear all caches
@@ -23,8 +27,6 @@ php artisan route:clear
 php artisan cache:clear
 php artisan view:clear
 
-# Start PHP-FPM
-php-fpm -D
-
-# Start Nginx
-nginx -g "daemon off;"
+# Iniciar PHP-FPM y Nginx
+php-fpm &
+nginx -g 'daemon off;'
