@@ -66,36 +66,33 @@ class MenuOCRController extends Controller
             Log::info('OCR completed, parsing text');
             $menuData = $this->parseMenuText($text);
 
-            if (isset($menuData['items'])) {
-                foreach ($menuData['items'] as $item) {
-                    // Asegurar que todos los campos opcionales tengan un valor por defecto
-                    $menuItem = [
-                        'category' => $item['category'] ?? 'Sin categoría',
-                        'subcategory' => $item['subcategory'] ?? null,
-                        'dish_name' => $item['dish_name'] ?? '',
-                        'price' => $item['price'] ?? 0,
-                        'description' => $item['description'] ?? '',
-                        'special_notes' => $item['special_notes'] ?? '',
-                        'discount' => $item['discount'] ?? null,
-                        'additional_details' => $item['additional_details'] ?? null
-                    ];
-                    Menu::create($menuItem);
+            if (isset($menuData['structured_menu']['categories'])) {
+                $itemsCount = 0;
+                foreach ($menuData['structured_menu']['categories'] as $category) {
+                    foreach ($category['subcategories'] as $subcategory) {
+                        foreach ($subcategory['dishes'] as $dish) {
+                            Menu::create([
+                                'category' => $category['name'],
+                                'subcategory' => $subcategory['name'] ?? null,
+                                'dish_name' => $dish['name'],
+                                'price' => $dish['price'],
+                                'description' => $dish['description'] ?? ''
+                            ]);
+                            $itemsCount++;
+                        }
+                    }
                 }
+
+                return response()->json([
+                    'message' => 'Menu procesado exitosamente',
+                    'items_count' => $itemsCount,
+                    'menu' => $menuData['structured_menu'],
+                    'raw_text' => app()->environment('local') ? $text : null
+                ]);
             }
 
-            Storage::disk('local')->delete($path);
-            if (isset($outputPath)) {
-                Storage::disk('local')->delete('temp/output-1.png');
-            }
+            throw new \Exception('No se pudo procesar el menú correctamente');
 
-            return response()->json([
-                'message' => 'Menu procesado exitosamente',
-                'items_count' => count($menuData['items'] ?? []),
-                'menu' => $menuData['structured_menu'] ?? null,
-                'general_notes' => $menuData['structured_menu']['general_notes'] ?? null,
-                'raw_text' => app()->environment('local') ? $text : null
-            ]);
-            
         } catch (\Exception $e) {
             Log::error('Menu processing failed', [
                 'error' => 'Error al procesar el menú: ' . $e->getMessage(),
@@ -110,67 +107,44 @@ class MenuOCRController extends Controller
     }
 
     private function cleanMenuText($text) {
-        // Eliminar caracteres no imprimibles
-        $text = preg_replace('/[\x00-\x1F\x7F-\x9F]/u', '', $text);
-        
-        // Eliminar caracteres especiales y números al inicio de las líneas
-        $text = preg_replace('/^[\d»\*\s]+/m', '', $text);
-        
-        // Eliminar caracteres especiales al final de las líneas
-        $text = preg_replace('/_+\s*$|Q\s*\/|\(\s*Y\s*\)|\s*=+\s*$|-+\s*$/m', '', $text);
-        
-        // Normalizar precios
-        $text = preg_replace('/(\d+)[.,](\d{2})\s*€?/', '$1.$2', $text);
-        
-        // Normalizar caracteres especiales
-        $text = str_replace(['8', '&'], 'Y', $text);
-        
-        // Limpiar líneas vacías múltiples y espacios
-        $text = preg_replace('/\n{3,}/', "\n\n", $text);
+        // 1. Eliminar caracteres no imprimibles
+        $text = preg_replace('/[\x00-\x1F\x7F-\x9F\x{2500}-\x{257F}]/u', '', $text);
+
+        // 2. Reemplazar múltiples espacios
         $text = preg_replace('/\s+/', ' ', $text);
-        
-        return $text;
+
+        // 3. Eliminar espacios alrededor de signos
+        $text = preg_replace('/\s*([-,:;])\s*/', '$1', $text);
+
+        // 4. Normalizar precios
+        $text = preg_replace('/(\d+)(?:[.,](\d{2}))?\s*(?:[€$]|[\p{Sc}])?\s*-\s*(\d+)(?:[.,](\d{2}))?\s*(?:[€$]|[\p{Sc}])?/u', '$1.$2-$3.$4', $text);
+        $text = preg_replace('/(\d+)[.,](\d{2})\s*(?:[€$]|[\p{Sc}])?/u', '$1.$2', $text);
+
+        return trim($text);
     }
 
     private function preprocessMenuText($text)
     {
         $lines = explode("\n", $text);
         $newLines = [];
-        $previousLine = '';
+        $currentDish = '';
 
         foreach ($lines as $line) {
             $trimmedLine = trim($line);
-
-            // 1. Eliminar líneas sin letras o cortas
-            if (!preg_match('/[a-zA-ZáéíóúÁÉÍÓÚñÑ]/u', $trimmedLine) || strlen($trimmedLine) <= 2) {
-                continue;
-            }
-
-            // 2. Unir líneas que pertenecen al mismo plato
-            $shouldMerge = false;
-            if (!empty($previousLine)) {
-                $shouldMerge =
-                    preg_match('/^[\p{Ll}\p{P}\s»]/u', $trimmedLine) || // Empieza con minúscula, símbolo o »
-                    preg_match('/[,;]\s*$/u', $previousLine) ||        // La línea anterior termina en coma o punto y coma
-                    !preg_match('/[.!?]\s*$/u', $previousLine) ||       // La línea anterior no termina en puntuación final
-                    !preg_match('/[A-ZÁÉÍÓÚÑ]/u', $trimmedLine) ||        // No tiene mayúsculas (probablemente continuación)
-                    preg_match('/^(?:con|y|de|del|la|las|los|el|en|al|por)\s/i', $trimmedLine); // Empieza con conectores comunes
-
-                if (!preg_match('/\d+(?:[.,]\d{2})?\s*(?:€|EUR)/u', $trimmedLine) && 
-                    preg_match('/\d+(?:[.,]\d{2})?\s*(?:€|EUR)/u', $previousLine) && 
-                    $shouldMerge) {
-                    $shouldMerge = false; //Evita unir precios separados
+            if (preg_match('/\d+(?:[.,]\d{2})?(?:\s*(?:-|a)\s*\d+(?:[.,]\d{2})?)?\s*[\p{Sc}]?/u', $trimmedLine)) {
+                if (!empty($currentDish)) {
+                    $newLines[] = $currentDish;
                 }
-
-                if ($shouldMerge) {
-                    $newLines[count($newLines) - 1] .= ' ' . $trimmedLine;
-                    $previousLine = $newLines[count($newLines) - 1];
-                    continue;
-                }
+                $currentDish = $trimmedLine;
+            } elseif (!empty($trimmedLine) && !empty($currentDish)) {
+                $currentDish .= ' ' . $trimmedLine;
+            } elseif (!empty($trimmedLine)) {
+                $newLines[] = $trimmedLine;
             }
+        }
 
-            $newLines[] = $trimmedLine;
-            $previousLine = $trimmedLine;
+        if (!empty($currentDish)) {
+            $newLines[] = $currentDish;
         }
 
         return implode("\n", $newLines);
@@ -181,29 +155,32 @@ class MenuOCRController extends Controller
         try {
             $cleanedText = $this->cleanMenuText($text);
             $preprocessedText = $this->preprocessMenuText($cleanedText);
-            
-            // Split menu into categories
             $categories = $this->splitMenuIntoCategories($preprocessedText);
-            
-            $allResults = [
-                'categories' => [],
-                'general_notes' => ''
-            ];
+            $allResults = ['categories' => []];
 
-            // Process each category separately
             foreach ($categories as $categoryName => $categoryContent) {
-                $categoryPrompt = $this->buildOpenAIPrompt($categoryContent);
-                $categoryResult = $this->processWithOpenAI($categoryPrompt);
-                
-                if (isset($categoryResult->categories[0])) {
-                    $allResults['categories'][] = $categoryResult->categories[0];
+                try {
+                    $categoryPrompt = $this->buildOpenAIPrompt($categoryContent);
+                    $categoryResult = $this->processWithOpenAI($categoryPrompt);
+                    $decodedResult = json_decode($categoryResult, true);
+
+                    if ($decodedResult && isset($decodedResult['categories'][0])) {
+                        $allResults['categories'][] = $decodedResult['categories'][0];
+                    } else {
+                        Log::error('OpenAI returned invalid JSON', [
+                            'category' => $categoryName,
+                            'response' => $categoryResult
+                        ]);
+                    }
+                } catch (\Exception $e) {
+                    Log::error('Category processing failed', [
+                        'category' => $categoryName,
+                        'error' => $e->getMessage()
+                    ]);
                 }
             }
 
-            return [
-                'structured_menu' => $allResults,
-                'items' => $this->convertToItems($allResults)
-            ];
+            return ['structured_menu' => $allResults];
 
         } catch (\Exception $e) {
             Log::error('Menu parsing failed:', [
@@ -243,7 +220,7 @@ class MenuOCRController extends Controller
     private function processWithOpenAI($prompt)
     {
         $response = $this->openai->chat()->create([
-            'model' => 'gpt-3.5-turbo-16k',
+            'model' => 'gpt-3.5-turbo-16k', // Upgraded to GPT-4
             'messages' => [
                 [
                     'role' => 'system',
@@ -254,21 +231,26 @@ class MenuOCRController extends Controller
                     'content' => $prompt
                 ]
             ],
-            'temperature' => 0.5,
+            'temperature' => 0.3,
             'max_tokens' => 3000
         ]);
 
-        return json_decode($response->choices[0]->message->content);
+        return $response->choices[0]->message->content;
     }
 
     private function buildOpenAIPrompt(string $menuText): string
     {
-        $prompt = <<<EOT
-        Eres un experto en análisis de menús de restaurantes. Extrae cada plato, su precio y descripción (generada de acuerdo al nombre del platillo). 
-        Crea descripciones cortas si no existen. Los nombres de platos pueden ser largos. 
-        Si un plato no tiene descripción, genera una corta basada en su nombre.
+        return <<<EOT
+        Eres un experto en análisis de menús de restaurantes. Tu tarea es extraer la información de los platos y organizarla en formato JSON.
+        Cada línea del menú representa un plato con su precio o información adicional. El precio es el indicador CLAVE de un nuevo plato.
 
-        **Formato JSON:**
+        Reglas:
+        1. Un plato SIEMPRE tiene precio. Formato: número (10), decimal (10.50), o rango (10-12) posiblemente seguido de un símbolo de moneda.
+        2. Líneas SIN precio: títulos, descripciones generales o continuaciones del plato ANTERIOR si la línea anterior SÍ tenía precio.
+        3. Nombres de platos largos: ¡No los dividas! Un plato puede ocupar varias palabras antes del precio.
+        4. Crea descripciones concisas para cada plato, incluso si no hay una explícita.
+
+        Formato JSON:
         {
           "categories": [
             {
@@ -279,34 +261,19 @@ class MenuOCRController extends Controller
                   "dishes": [
                     {
                       "name": "Nombre completo del plato (puede ser largo)",
-                      "price": "Precio del plato",
-                      "description": "Descripción del plato (generada)",
-                      "special_notes": "Notas especiales (opcional)",
-                      "discount": "Descuento (opcional)",
-                      "additional_details": "Información adicional (opcional)"
+                      "price": "Precio del plato (con o sin símbolo de moneda)",
+                      "description": "Descripción concisa y atractiva"
                     }
                   ]
                 }
               ]
             }
-          ],
-          "general_notes": "Notas generales del menú (opcional)"
+          ]
         }
 
-        **Ejemplos:**
-
-        --- Tapas ---
-        Patatas bravas con alioli y salsa picante - 7.50
-        Patatas fritas crujientes con dos salsas caseras.
-
-        Croquetas de jamón ibérico con reducción de Pedro Ximénez - 9.00
-        Crujientes por fuera, cremosas por dentro, con un toque dulce.
-
-        **Menú a analizar:**
-
+        Menú:
         {$menuText}
         EOT;
-        return $prompt;
     }
 
     private function useLegacyParser($text)
@@ -361,9 +328,8 @@ class MenuOCRController extends Controller
         $currentCategory = '';
         $currentSubcategory = '';
         
-        // Patrones mejorados para detectar categorías y platos
         $categoryPattern = '/^[A-ZÁÉÍÓÚÑ\s]{3,}$/u';
-        $dishPattern = '/^(.+?)\s+(\d+(?:[.,]\d{2})?\s*(?:€|USD|[\p{Sc}]|EUR)?)(?:\s*-\s*(\d+(?:[.,]\d{2})?\s*(?:€|USD|[\p{Sc}]|EUR)?))?/iu';
+        $dishPattern = '/^(.+?)(?:\s+|_+)(\d+(?:[.,]\d{2})?(?:\s*(?:€|USD|[\p{Sc}]|EUR)?)(?:\s*-\s*\d+(?:[.,]\d{2})?(?:\s*(?:€|USD|[\p{Sc}]|EUR)?)?)?)/u';
         
         for ($index = 0; $index < count($lines); $index++) {
             $trimmedLine = trim($lines[$index]);
