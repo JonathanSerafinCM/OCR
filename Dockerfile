@@ -15,7 +15,8 @@ RUN apt-get update && apt-get install -y \
     unzip \
     libzip-dev \
     default-mysql-client \
-    dos2unix
+    dos2unix \
+    netcat-openbsd
 
 # Instalar extensiones PHP
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
@@ -36,6 +37,9 @@ COPY composer.json composer.lock ./
 
 # Set proper permissions and install dependencies
 ENV COMPOSER_ALLOW_SUPERUSER=1
+# Add environment variables for database connection
+ENV DB_USERNAME=user \
+    DB_PASSWORD=password
 RUN composer install --no-scripts --no-autoloader
 
 # Copy entrypoint script first and set permissions
@@ -55,4 +59,5 @@ COPY nginx.conf /etc/nginx/nginx.conf
 
 EXPOSE 80
 
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["php-fpm"]
