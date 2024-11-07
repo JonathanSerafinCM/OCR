@@ -51,6 +51,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh && \
 COPY . .
 
 # Configurar permisos y finalizar Composer
+RUN git config --global --add safe.directory /var/www/html
 RUN chown -R www-data:www-data /var/www/html \
     && chmod -R 755 /var/www/html \
     && composer dump-autoload --optimize

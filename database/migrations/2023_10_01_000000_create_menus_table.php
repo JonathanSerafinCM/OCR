@@ -10,16 +10,11 @@ class CreateMenusTable extends Migration
     {
         Schema::create('menus', function (Blueprint $table) {
             $table->id();
-            $table->string('category');
-            $table->string('dish_name');
-            $table->decimal('price', 8, 2);
+            $table->string('dish_name'); // Add 'dish_name' instead
+            $table->string('price');
             $table->text('description')->nullable();
-            $table->text('special_notes')->nullable();
+            $table->string('category')->nullable(); // Make category nullable
             $table->timestamps();
-        });
-
-        Schema::table('menus', function (Blueprint $table) {
-            $table->string('price')->change();
         });
     }
 

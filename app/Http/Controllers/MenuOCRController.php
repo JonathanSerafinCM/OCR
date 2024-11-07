@@ -9,7 +9,6 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use OpenAI;
-use JsonSchema\Validator as JsonSchemaValidator;
 
 class MenuOCRController extends Controller
 {
@@ -40,356 +39,277 @@ class MenuOCRController extends Controller
             $path = Storage::disk('local')->putFile('temp', $file);
             $fullPath = Storage::disk('local')->path($path);
             
+            // Convert PDF to image if needed
             if ($file->getClientOriginalExtension() === 'pdf') {
-                Log::info('Converting PDF to image');
-                $outputPath = Storage::disk('local')->path('temp/output');
-                exec("pdftoppm -png {$fullPath} {$outputPath} 2>&1", $output, $returnCode);
-                
-                if ($returnCode !== 0) {
-                    Log::error('PDF conversion failed', ['output' => $output, 'code' => $returnCode]);
-                    throw new \Exception('PDF conversion failed');
-                }
-                
-                $fullPath = $outputPath . '-1.png';
+                $fullPath = $this->convertPdfToImage($fullPath);
             }
 
-            Log::info('Running OCR on file', ['path' => $fullPath]);
+            // Perform OCR
+            $text = $this->performOCR($fullPath);
             
-            $text = (new TesseractOCR($fullPath))
-                ->lang('spa')
-                ->run();
+            // Process text with OpenAI
+            $menuItems = $this->extractMenuItems($text);
+            
+            // Save to database
+            $savedItems = $this->saveMenuItems($menuItems);
 
-            if (empty($text)) {
-                throw new \Exception('OCR resulted in empty text');
-            }
-
-            Log::info('OCR completed, parsing text');
-            $menuData = $this->parseMenuText($text);
-
-            if (isset($menuData['structured_menu']['categories'])) {
-                $itemsCount = 0;
-                foreach ($menuData['structured_menu']['categories'] as $category) {
-                    foreach ($category['subcategories'] as $subcategory) {
-                        foreach ($subcategory['dishes'] as $dish) {
-                            Menu::create([
-                                'category' => $category['name'],
-                                'subcategory' => $subcategory['name'] ?? null,
-                                'dish_name' => $dish['name'],
-                                'price' => $dish['price'],
-                                'description' => $dish['description'] ?? ''
-                            ]);
-                            $itemsCount++;
-                        }
-                    }
-                }
-
-                return response()->json([
-                    'message' => 'Menu procesado exitosamente',
-                    'items_count' => $itemsCount,
-                    'menu' => $menuData['structured_menu'],
-                    'raw_text' => app()->environment('local') ? $text : null
-                ]);
-            }
-
-            throw new \Exception('No se pudo procesar el menú correctamente');
+            return response()->json([
+                'message' => 'Menu processed successfully',
+                'items_count' => count($savedItems),
+                'items' => $savedItems,
+                'raw_text' => app()->environment('local') ? $text : null
+            ]);
 
         } catch (\Exception $e) {
             Log::error('Menu processing failed', [
-                'error' => 'Error al procesar el menú: ' . $e->getMessage(),
+                'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString()
             ]);
             
             return response()->json([
-                'error' => 'Error al procesar el menú: ' . $e->getMessage(),
+                'error' => $e->getMessage(),
                 'details' => app()->environment('local') ? $e->getTraceAsString() : null
             ], 500);
         }
     }
 
-    private function cleanMenuText($text) {
-        // 1. Eliminar caracteres no imprimibles
+    private function convertPdfToImage($pdfPath)
+    {
+        Log::info('Converting PDF to image');
+        $outputPath = Storage::disk('local')->path('temp/output');
+        exec("pdftoppm -png {$pdfPath} {$outputPath}", $output, $returnCode);
+        
+        if ($returnCode !== 0) {
+            throw new \Exception('PDF conversion failed');
+        }
+        
+        return $outputPath . '-1.png';
+    }
+
+    private function performOCR($imagePath)
+    {
+        Log::info('Running OCR on file', ['path' => $imagePath]);
+        
+        $text = (new TesseractOCR($imagePath))
+            ->lang('spa')
+            ->run();
+
+        if (empty($text)) {
+            throw new \Exception('OCR resulted in empty text');
+        }
+
+        return $this->cleanText($text);
+    }
+
+    private function cleanText($text)
+    {
+        // 1. Eliminar caracteres no imprimibles y símbolos gráficos
         $text = preg_replace('/[\x00-\x1F\x7F-\x9F\x{2500}-\x{257F}]/u', '', $text);
-
-        // 2. Reemplazar múltiples espacios
+        $text = preg_replace('/[\x00-\x1F\x7F-\x9F]/u', '', $text);
+        
+        // Replace multiple spaces/newlines with single ones
         $text = preg_replace('/\s+/', ' ', $text);
-
-        // 3. Eliminar espacios alrededor de signos
-        $text = preg_replace('/\s*([-,:;])\s*/', '$1', $text);
+        
+        $text = preg_replace('/\s*([-,:;.])\s*/', '$1', $text);
 
         // 4. Normalizar precios
         $text = preg_replace('/(\d+)(?:[.,](\d{2}))?\s*(?:[€$]|[\p{Sc}])?\s*-\s*(\d+)(?:[.,](\d{2}))?\s*(?:[€$]|[\p{Sc}])?/u', '$1.$2-$3.$4', $text);
         $text = preg_replace('/(\d+)[.,](\d{2})\s*(?:[€$]|[\p{Sc}])?/u', '$1.$2', $text);
 
+        // 5. Eliminar texto que se repite mucho
+        $text = preg_replace('/\*+/', '*', $text);
+
+        // Reglas importantes para las descripciones:
+        $text = preg_replace('/[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ\s\*\-\.,]/u', '', $text);
+
         return trim($text);
     }
 
-    private function preprocessMenuText($text)
+    private function buildOpenAIPrompt($text, $attempt = 0)
     {
-        $lines = explode("\n", $text);
-        $newLines = [];
-        $currentDish = '';
+        // Add variation based on retry attempt
+        $variation = ($attempt > 0) 
+            ? "\n(Intento {$attempt} - IMPORTANTE: Genera SOLO JSON válido)" 
+            : "";
 
-        foreach ($lines as $line) {
-            $trimmedLine = trim($line);
-            if (preg_match('/\d+(?:[.,]\d{2})?(?:\s*(?:-|a)\s*\d+(?:[.,]\d{2})?)?\s*[\p{Sc}]?/u', $trimmedLine)) {
-                if (!empty($currentDish)) {
-                    $newLines[] = $currentDish;
-                }
-                $currentDish = $trimmedLine;
-            } elseif (!empty($trimmedLine) && !empty($currentDish)) {
-                $currentDish .= ' ' . $trimmedLine;
-            } elseif (!empty($trimmedLine)) {
-                $newLines[] = $trimmedLine;
-            }
-        }
-
-        if (!empty($currentDish)) {
-            $newLines[] = $currentDish;
-        }
-
-        return implode("\n", $newLines);
-    }
-
-    private function parseMenuText($text)
-    {
-        try {
-            $cleanedText = $this->cleanMenuText($text);
-            $preprocessedText = $this->preprocessMenuText($cleanedText);
-            $categories = $this->splitMenuIntoCategories($preprocessedText);
-            $allResults = ['categories' => []];
-
-            foreach ($categories as $categoryName => $categoryContent) {
-                try {
-                    $categoryPrompt = $this->buildOpenAIPrompt($categoryContent);
-                    $categoryResult = $this->processWithOpenAI($categoryPrompt);
-                    $decodedResult = json_decode($categoryResult, true);
-
-                    if ($decodedResult && isset($decodedResult['categories'][0])) {
-                        $allResults['categories'][] = $decodedResult['categories'][0];
-                    } else {
-                        Log::error('OpenAI returned invalid JSON', [
-                            'category' => $categoryName,
-                            'response' => $categoryResult
-                        ]);
-                    }
-                } catch (\Exception $e) {
-                    Log::error('Category processing failed', [
-                        'category' => $categoryName,
-                        'error' => $e->getMessage()
-                    ]);
-                }
-            }
-
-            return ['structured_menu' => $allResults];
-
-        } catch (\Exception $e) {
-            Log::error('Menu parsing failed:', [
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
-            ]);
-            return $this->useLegacyParser($text);
-        }
-    }
-
-    private function splitMenuIntoCategories($text)
-    {
-        $lines = explode("\n", $text);
-        $categories = [];
-        $currentCategory = 'General';
-        $currentContent = '';
-
-        foreach ($lines as $line) {
-            if (preg_match('/^---\s*(.+?)\s*---$/', $line, $matches)) {
-                if (!empty($currentContent)) {
-                    $categories[$currentCategory] = trim($currentContent);
-                }
-                $currentCategory = $matches[1];
-                $currentContent = '';
-            } else {
-                $currentContent .= $line . "\n";
-            }
-        }
-
-        if (!empty($currentContent)) {
-            $categories[$currentCategory] = trim($currentContent);
-        }
-
-        return $categories;
-    }
-
-    private function processWithOpenAI($prompt)
-    {
-        $response = $this->openai->chat()->create([
-            'model' => 'gpt-3.5-turbo-16k', // Upgraded to GPT-4
-            'messages' => [
-                [
-                    'role' => 'system',
-                    'content' => 'Eres un experto chef analizando menús de restaurantes.'
-                ],
-                [
-                    'role' => 'user',
-                    'content' => $prompt
-                ]
-            ],
-            'temperature' => 0.3,
-            'max_tokens' => 3000
-        ]);
-
-        return $response->choices[0]->message->content;
-    }
-
-    private function buildOpenAIPrompt(string $menuText): string
-    {
         return <<<EOT
-        Eres un experto en análisis de menús de restaurantes. Tu tarea es extraer la información de los platos y organizarla en formato JSON.
-        Cada línea del menú representa un plato con su precio o información adicional. El precio es el indicador CLAVE de un nuevo plato.
+        Analiza este menú y devuelve SOLO un array JSON. Sin texto adicional.
+
+        [
+          {
+            "name": "Nombre del plato",
+            "price": "12.50",
+            "description": "Descripción breve",
+            "category": "Categoría"
+          }
+        ]
 
         Reglas:
-        1. Un plato SIEMPRE tiene precio. Formato: número (10), decimal (10.50), o rango (10-12) posiblemente seguido de un símbolo de moneda.
-        2. Líneas SIN precio: títulos, descripciones generales o continuaciones del plato ANTERIOR si la línea anterior SÍ tenía precio.
-        3. Nombres de platos largos: ¡No los dividas! Un plato puede ocupar varias palabras antes del precio.
-        4. Crea descripciones concisas para cada plato, incluso si no hay una explícita.
+        1. Solo n��meros y punto decimal en precio
+        2. Nombre y precio son obligatorios
+        3. Genera descripción si falta
+        4. Categoriza los platos
 
-        Formato JSON:
-        {
-          "categories": [
-            {
-              "name": "Nombre de la categoría",
-              "subcategories": [
-                {
-                  "name": "Nombre de la subcategoría (opcional)",
-                  "dishes": [
-                    {
-                      "name": "Nombre completo del plato (puede ser largo)",
-                      "price": "Precio del plato (con o sin símbolo de moneda)",
-                      "description": "Descripción concisa y atractiva"
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-
-        Menú:
-        {$menuText}
+        Menú:{$variation}
+        {$text}
         EOT;
     }
 
-    private function useLegacyParser($text)
+    private function extractMenuItems($text)
     {
-        Log::info('Falling back to legacy parser');
-        $legacyItems = $this->legacyParseMenuText($text);
-        
-        Log::debug('Legacy parser results:', ['items' => $legacyItems]);
-        
-        // Convertir al nuevo formato
-        $structuredMenu = [
-            'categories' => []
-        ];
-        
-        $categorizedItems = [];
-        foreach ($legacyItems as $item) {
-            $category = $item['category'] ?: 'Sin categoría';
-            if (!isset($categorizedItems[$category])) {
-                $categorizedItems[$category] = [
-                    'name' => $category,
-                    'subcategories' => [
-                        [
-                            'name' => $item['subcategory'] ?? 'General',
-                            'dishes' => []
-                        ]
-                    ]
-                ];
-            }
-            
-            $categorizedItems[$category]['subcategories'][0]['dishes'][] = [
-                'name' => $item['dish_name'],
-                'price' => $item['price'],
-                'description' => $item['description'] ?: '',
-                'special_notes' => $item['special_notes'] ?: '',
-                'discount' => $item['discount'] ?: '',
-                'additional_details' => $item['additional_details'] ?: ''
-            ];
-        }
-        
-        $structuredMenu['categories'] = array_values($categorizedItems);
+        $maxRetries = 3;
+        $attempt = 0;
+        $lastError = null;
 
-        return [
-            'structured_menu' => $structuredMenu,
-            'items' => $legacyItems
-        ];
+        while ($attempt < $maxRetries) {
+            try {
+                $prompt = $this->buildOpenAIPrompt($text, $attempt);
+                Log::debug('Sending prompt to OpenAI:', ['attempt' => $attempt + 1, 'prompt' => $prompt]);
+
+                $response = $this->openai->chat()->create([
+                    'model' => 'gpt-3.5-turbo',
+                    'messages' => [
+                        [
+                            'role' => 'system',
+                            'content' => 'Eres un parser de menús. Devuelve SOLO JSON válido.'
+                        ],
+                        ['role' => 'user', 'content' => $prompt]
+                    ],
+                    'temperature' => $attempt > 0 ? 0.5 : 0.3,
+                    'max_tokens' => 2000
+                ]);
+
+                $content = $response->choices[0]->message->content;
+                Log::debug('Raw OpenAI response:', ['content' => $content]);
+
+                // Clean and validate JSON
+                $content = $this->cleanAndValidateJSON($content);
+                Log::debug('Cleaned JSON:', ['content' => $content]);
+
+                $menuItems = json_decode($content, true);
+
+                if (json_last_error() !== JSON_ERROR_NONE) {
+                    throw new \Exception('JSON decode error: ' . json_last_error_msg());
+                }
+
+                // Validate menu items
+                return $this->validateMenuItems($menuItems);
+
+            } catch (\Exception $e) {
+                $lastError = $e->getMessage();
+                Log::error('Attempt ' . ($attempt + 1) . ' failed:', [
+                    'error' => $lastError,
+                    'response' => $content ?? null
+                ]);
+
+                $attempt++;
+                if ($attempt >= $maxRetries) {
+                    throw new \Exception("Failed after {$maxRetries} attempts: {$lastError}");
+                }
+
+                sleep(1);
+            }
+        }
     }
 
-    private function legacyParseMenuText($text)
+    private function cleanAndValidateJSON($content)
     {
-        $items = [];
-        $lines = explode("\n", $text);
-        $currentCategory = '';
-        $currentSubcategory = '';
+        // Remove any text before first '[' or '{'
+        $content = preg_replace('/^[^[{]*/s', '', $content);
         
-        $categoryPattern = '/^[A-ZÁÉÍÓÚÑ\s]{3,}$/u';
-        $dishPattern = '/^(.+?)(?:\s+|_+)(\d+(?:[.,]\d{2})?(?:\s*(?:€|USD|[\p{Sc}]|EUR)?)(?:\s*-\s*\d+(?:[.,]\d{2})?(?:\s*(?:€|USD|[\p{Sc}]|EUR)?)?)?)/u';
-        
-        for ($index = 0; $index < count($lines); $index++) {
-            $trimmedLine = trim($lines[$index]);
-            if (empty($trimmedLine)) continue;
+        // Remove any text after last ']' or '}'
+        $content = preg_replace('/[^\]\}]+$/s', '', $content);
 
-            // Detectar categorías
-            if (preg_match($categoryPattern, $trimmedLine)) {
-                $currentCategory = $trimmedLine;
-                continue;
+        // If content starts with '{', wrap it in array
+        if (str_starts_with(trim($content), '{')) {
+            $content = '[' . $content . ']';
+        }
+
+        // Ensure it's a valid JSON array structure
+        if (!preg_match('/^\s*\[[\s\S]*\]\s*$/', $content)) {
+            throw new \Exception('Invalid JSON array structure');
+        }
+
+        return $content;
+    }
+
+    private function validateMenuItems($items)
+    {
+        if (!is_array($items) || empty($items)) {
+            throw new \Exception('No menu items found in response');
+        }
+
+        return array_map(function($item) {
+            if (!isset($item['name']) || !isset($item['price'])) {
+                throw new \Exception('Missing required fields');
             }
 
-            // Detectar platos con precios
-            if (preg_match($dishPattern, $trimmedLine, $matches)) {
-                $dishName = trim($matches[1]);
-                $price = isset($matches[3]) ? max(floatval(str_replace(',', '.', $matches[2])), floatval(str_replace(',', '.', $matches[3]))) : str_replace(',', '.', $matches[2]);
+            return [
+                'name' => trim($item['name']),
+                'price' => preg_replace('/[^0-9.]/', '', $item['price']),
+                'description' => $item['description'] ?? 'Sin descripción',
+                'category' => $item['category'] ?? 'Sin Categoría'
+            ];
+        }, $items);
+    }
 
-                // Extraer descripción del plato (líneas siguientes)
-                $description = '';
-                $nextIndex = $index + 1;
-                while (isset($lines[$nextIndex]) && 
-                       !preg_match($categoryPattern, trim($lines[$nextIndex])) && 
-                       !preg_match($dishPattern, trim($lines[$nextIndex]))) {
-                    $nextLine = trim($lines[$nextIndex]);
-                    if (!empty($nextLine)) {
-                        $description .= ' ' . $nextLine;
-                    }
-                    $nextIndex++;
+    private $keywords = [
+        'Entradas' => ['entrante', 'aperitivo', 'para picar', 'tapa'],
+        'Ensaladas' => ['ensalada', 'mezclum', 'lechuga', 'tomate'],
+        'Carnes' => ['carne', 'pollo', 'ternera', 'cerdo', 'pescado', 'bistec', 'filete'],
+        'Postres' => ['postre', 'dulce', 'pastel', 'tarta', 'helado'],
+        // ...más categorías
+    ];
+
+    private function assignCategory(string $dishName, string $dishDescription, array $keywords): ?string
+    {
+        foreach ($keywords as $category => $categoryKeywords) {
+            foreach ($categoryKeywords as $keyword) {
+                if (stripos($dishName, $keyword) !== false || stripos($dishDescription, $keyword) !== false) {
+                    return $category;
                 }
-                $index = $nextIndex - 1;
+            }
+        }
+        return null; // No se encontró una categoría
+    }
 
-                // Detectar notas especiales
-                $specialNotes = '';
-                if (preg_match('/\*([^*]+)$/', $description, $noteMatches)) {
-                    $specialNotes = trim($noteMatches[1]);
-                    $description = trim(str_replace($noteMatches[0], '', $description));
+    private function saveMenuItems($menuItems)
+    {
+        $savedItems = [];
+        
+        foreach ($menuItems as $item) {
+            $category = $item['category'] ?? null;
+            
+            if (!$category) {
+                $assignedCategory = $this->assignCategory($item['name'], $item['description'], $this->keywords);
+                if ($assignedCategory) {
+                    $category = $assignedCategory;
+                } else {
+                    $category = 'Sin Categoría';
                 }
+            }
 
-                // Detectar descuentos
-                $discount = '';
-                if (preg_match('/(2x1|[0-9]+%\s*dto\.?|oferta)/i', $dishName, $discountMatch)) {
-                    $discount = $discountMatch[0];
-                    $dishName = trim(str_replace($discountMatch[0], '', $dishName));
-                }
+            // Verifica si dish_name existe ANTES de intentar insertar
+            if (isset($item['name']) && !empty(trim($item['name']))) { 
+                $savedItems[] = Menu::create([
+                    'dish_name' => $item['name'], // Changed from 'name' to 'dish_name'
 
-                $items[] = [
-                    'category' => $currentCategory ?: 'Sin categoría',
-                    'subcategory' => $currentSubcategory ?: null,
-                    'dish_name' => $dishName,
-                    'price' => $price,
-                    'description' => trim($description),
-                    'special_notes' => $specialNotes,
-                    'discount' => $discount,
-                    'additional_details' => null
-                ];
+                    'price' => $item['price'],
+                    'description' => $item['description'] ?? null,
+                    'category' => $category
+                ]);
+            } else {
+                // Maneja la ausencia de dish_name
+                Log::warning('Platillo omitido, sin nombre:', ['dish' => $item]);
             }
         }
 
-        return $items;
+        return $savedItems;
     }
 }
+
+
+
 
 
 

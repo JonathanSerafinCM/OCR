@@ -12,7 +12,7 @@ class Menu extends Model
     protected $fillable = [
         'category',
         'subcategory',
-        'dish_name',
+        'dish_name', // Ensure 'dish_name' is included
         'price',
         'description',
         'special_notes',
