@@ -432,57 +432,88 @@ EOT;
 
     private function generateDescriptionsAndCategories($extractedItems)
     {
-        // Debug input items
-        Log::debug('Input items for descriptions:', ['items' => $extractedItems]);
+        $maxRetries = 3;
+        $attempt = 0;
+        $lastError = null;
 
-        $prompt = $this->buildDescriptionPrompt($extractedItems);
-        Log::debug('Sending description prompt to OpenAI:', ['prompt' => $prompt]);
+        while ($attempt < $maxRetries) {
+            try {
+                $prompt = $this->buildDescriptionPrompt($extractedItems, $attempt);
+                Log::debug('Sending description prompt to OpenAI (attempt ' . ($attempt + 1) . '):', ['prompt' => $prompt]);
 
-        $response = $this->openai->chat()->create([
-            'model' => 'gpt-3.5-turbo',
-            'messages' => [
-                [
-                    'role' => 'system',
-                    'content' => 'Genera descripciones y categorías SOLO en formato JSON válido.'
-                ],
-                ['role' => 'user', 'content' => $prompt]
-            ],
-            'temperature' => 0.5, // Adjusted for better balance
-            'max_tokens' => 3000
-        ]);
+                $response = $this->openai->chat()->create([
+                    'model' => 'gpt-3.5-turbo',
+                    'messages' => [
+                        [
+                            'role' => 'system',
+                            'content' => 'Eres un asistente que mejora información de menús. Devuelve SOLO JSON válido.'
+                        ],
+                        ['role' => 'user', 'content' => $prompt]
+                    ],
+                    'temperature' => 0.5,
+                    'max_tokens' => 3000
+                ]);
 
-        $content = $response->choices[0]->message->content;
-        Log::debug('Raw OpenAI description response:', ['content' => $content]);
+                $content = $response->choices[0]->message->content;
+                Log::debug('Raw OpenAI description response:', ['content' => $content]);
 
-        try {
-            // Clean and validate JSON
-            $content = $this->cleanAndValidateJSON($content);
-            Log::debug('Cleaned JSON:', ['content' => $content]);
-            
-            // Use JSON_THROW_ON_ERROR for better error messages
-            $menuItems = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
-            
-            return $this->validateMenuItems($menuItems, true);
-        } catch (\JsonException $e) {
-            Log::error('JSON parsing failed:', [
-                'error' => $e->getMessage(),
-                'raw_content' => $content,
-                'response' => $response->choices[0]->message->content
-            ]);
-            throw $e;
+                // Clean and validate JSON
+                $content = $this->cleanAndValidateJSON($content);
+                Log::debug('Cleaned JSON:', ['content' => $content]);
+
+                $menuItems = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
+
+                return $this->validateMenuItems($menuItems, true);
+
+            } catch (\Exception $e) {
+                $lastError = $e->getMessage();
+                Log::error('Description generation attempt ' . ($attempt + 1) . ' failed:', [
+                    'error' => $lastError,
+                    'response' => $content ?? null
+                ]);
+
+                $attempt++;
+                if ($attempt >= $maxRetries) {
+                    throw new \Exception('Failed to generate descriptions after multiple attempts: ' . $lastError);
+                }
+
+                sleep(1);
+            }
         }
     }
 
-    private function buildDescriptionPrompt($extractedItems)
+    private function buildDescriptionPrompt($extractedItems, $attempt = 0)
     {
-        $itemsJson = json_encode($extractedItems, JSON_PRETTY_PRINT);
+        $itemsJson = json_encode($extractedItems, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+
+        $additionalInstructions = match ($attempt) {
+            1 => "\nEnfócate en agregar descripciones y categorías apropiadas a cada plato.",
+            2 => "\nÚltimo intento: Asegúrate de modificar las descripciones y categorías según las instrucciones.",
+            default => ""
+        };
 
         return <<<EOT
-Genera descripciones concisas (máximo 50 caracteres) y categorías para los siguientes platos. 
-Asegúrate de que la respuesta sea un array JSON válido con los campos "name", "price", "description" y "category" para cada plato.
+Necesito que agregues descripciones breves (máximo 50 caracteres) y categorías adecuadas a los siguientes platos. Devuelve un array JSON válido donde para cada objeto agregues los campos "description" y "category" a los existentes.
+
+Ejemplo de salida esperada:
+[
+    {
+        "name": "Hamburguesa Clásica",
+        "price": "10.50",
+        "description": "Jugosa hamburguesa con queso",
+        "category": "Hamburguesas"
+    },
+    {
+        "name": "Ensalada César",
+        "price": "8.00",
+        "description": "Lechuga, pollo y aderezo",
+        "category": "Ensaladas"
+    }
+]
 
 Platos a procesar:
 {$itemsJson}
+{$additionalInstructions}
 EOT;
     }
 
