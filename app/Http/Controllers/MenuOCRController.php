@@ -106,7 +106,7 @@ class MenuOCRController extends Controller
 
     private function cleanText($text)
     {
-        // 1. Basic cleaning (keep existing code)
+        // 1. Basic cleaning
         $text = preg_replace('/[\x00-\x1F\x7F-\x9F\x{2500}-\x{257F}]/u', '', $text);
         
         // 2. Replace special characters with spaces
@@ -116,18 +116,21 @@ class MenuOCRController extends Controller
         $text = preg_replace('/\s+/', ' ', $text);
         $text = preg_replace('/\s*([-,:;.])\s*/', '$1', $text);
         
-        // 4. Format prices
-        $text = preg_replace('/(\d+)(?:[.,](\d{2}))?\s*(?:[€$]|[\p{Sc}])?\s*-\s*(\d+)(?:[.,](\d{2}))?\s*(?:[€$]|[\p{Sc}])?/u', '$1.$2-$3.$4', $text);
-        $text = preg_replace('/(\d+)[.,](\d{2})\s*(?:[€$]|[\p{Sc}])?/u', '$1.$2', $text);
+        // 4. Format prices, handle ranges and clean prices
+        $text = preg_replace('/(\d+)([.,]\d{1,2})?\s*[-\/]\s*(\d+)([.,]\d{1,2})?\s*(?:[€$]|[\p{Sc}])?/u', '$1$2-$3$4', $text);
+        $text = preg_replace('/(\d+)([.,]\d{1,2})?\s*(?:[€$]|[\p{Sc}])?/u', '$1$2', $text);
         
         // 5. Separate items with newlines when price is followed by text
-        $text = preg_replace('/(\d+[\.,]\d{0,2}\s*(?:€|USD)?)\s*([a-zA-Z])/', "$1\n$2", $text);
+        $text = preg_replace('/(\d+[\.,]?\d{0,2}(?:-\d+[\.,]?\d{0,2})?)\s+([^\d]+)/u', "$1\n$2", $text);
         
-        // 6. Remove common non-menu words
+        // 6. Remove non-numeric characters from prices within the text
+        $text = preg_replace('/(\d+[\.,]?\d{0,2}(?:-\d+[\.,]?\d{0,2})?)[^\S\n]*(?=[A-Za-z])/u', "$1\n", $text);
+        
+        // 7. Remove common non-menu words
         $commonWords = ['unidad', 'informacion', 'alergenos', 'precios expresados', 'iva incluido', 'guarnicion'];
         $text = preg_replace('/\b(' . implode('|', $commonWords) . ')\b/iu', '', $text);
         
-        // 7. Clean up final text
+        // 8. Clean up final text
         $text = preg_replace('/[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ\s\*\-\.,\n]/u', '', $text);
         
         return trim($text);
@@ -363,7 +366,7 @@ class MenuOCRController extends Controller
                 }
 
                 // Validate extracted items
-                return $this->validateMenuItems($extractedItems);
+                return $this->validateExtractedItems($extractedItems);
 
             } catch (\Exception $e) {
                 $lastError = $e->getMessage();
@@ -388,30 +391,37 @@ class MenuOCRController extends Controller
 
     private function buildExtractionPrompt($text, $attempt = 0)
     {
-        $variation = match ($attempt) {
-            0 => "",
-            1 => "\n(Segundo intento: Un plato SIEMPRE tiene precio. Separa cada plato y su precio.)",
-            2 => "\n(Último intento: Extrae SOLO platos que tengan un precio claro.)",
+        $additionalInstructions = match ($attempt) {
+            1 => "\nEn el segundo intento, asegúrate de seguir las instrucciones exactamente.",
+            2 => "\nÚltimo intento: Por favor, sigue las instrucciones al pie de la letra.",
             default => ""
         };
-
+        
         return <<<EOT
-Extrae ÚNICAMENTE los nombres de los platos y sus precios del siguiente menú. Devuelve un array JSON con la siguiente estructura:
+Extrae únicamente los nombres de los platos y sus precios del siguiente menú. Devuelve un array JSON con la siguiente estructura:
 
 [
   {"name": "Nombre del plato", "price": "Precio"},
   {"name": "Otro plato", "price": "Precio"}
 ]
 
-Instrucciones:
+Instrucciones importantes:
 * El precio es el indicador principal de un nuevo plato.
-* Un plato SIEMPRE tiene un precio. Si un elemento no tiene precio, NO es un plato.
-* NO incluyas descripciones ni categorías en esta fase.
-* Si no estás seguro de si un elemento es un plato, omítelo. Es mejor omitir un plato que incluir información incorrecta.
-* Precios: pueden ser números (10), decimales (10.50) o rangos (10-12), con o sin símbolo de moneda.
+* Un plato **siempre** tiene un precio numérico o un rango numérico, sin caracteres adicionales.
+* Los precios deben ser números enteros o decimales (por ejemplo, 10, 10.50) o rangos (por ejemplo, 6-12), sin símbolos de moneda.
+* No incluyas platos sin precio. Si no puedes determinar el precio de un plato, **ómítelo**.
+* No incluyas descripciones ni categorías en esta fase.
+* Precios incorrectos como "e" o combinaciones no numéricas deben ser ignorados.
 
-Menú:{$variation}
+Ejemplos de precios válidos:
+- "10"
+- "10.50"
+- "6-12"
+- "8.95-17.50"
+
+Menú a procesar:
 {$text}
+{$additionalInstructions}
 EOT;
     }
 
@@ -422,8 +432,12 @@ EOT;
         }
 
         foreach ($items as $item) {
-            if (!isset($item['name']) || !isset($item['price'])) {
-                throw new \Exception('Missing required fields in extraction');
+            if (!isset($item['name']) || !isset($item['price']) || empty(trim($item['price']))) {
+                throw new \Exception('Missing or empty required fields in extraction');
+            }
+            // Ensure price is a valid number or range
+            if (!preg_match('/^\d+(\.\d{1,2})?(-\d+(\.\d{1,2})?)?$/', $item['price'])) {
+                throw new \Exception('Invalid price format for item: ' . $item['name']);
             }
         }
 
@@ -487,29 +501,31 @@ EOT;
         $itemsJson = json_encode($extractedItems, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
 
         $additionalInstructions = match ($attempt) {
-            1 => "\nEnfócate en agregar descripciones y categorías apropiadas a cada plato.",
-            2 => "\nÚltimo intento: Asegúrate de modificar las descripciones y categorías según las instrucciones.",
+            1 => "\nAsegúrate de agregar descripciones y categorías adecuadas a cada plato.",
+            2 => "\nÚltimo intento: Por favor, sigue exactamente el formato y las instrucciones proporcionadas.",
             default => ""
         };
 
         return <<<EOT
-Necesito que agregues descripciones breves (máximo 50 caracteres) y categorías adecuadas a los siguientes platos. Devuelve un array JSON válido donde para cada objeto agregues los campos "description" y "category" a los existentes.
+Necesito que agregues descripciones breves (máximo 50 caracteres) y categorías específicas a los siguientes platos. Devuelve un array JSON válido donde para cada objeto agregues los campos "description" y "category" a los existentes.
 
 Ejemplo de salida esperada:
 [
     {
-        "name": "Hamburguesa Clásica",
-        "price": "10.50",
-        "description": "Jugosa hamburguesa con queso",
-        "category": "Hamburguesas"
+        "name": "Sopa de Tomate",
+        "price": "5.50",
+        "description": "Sopa casera de tomates frescos",
+        "category": "Sopas"
     },
     {
-        "name": "Ensalada César",
-        "price": "8.00",
-        "description": "Lechuga, pollo y aderezo",
-        "category": "Ensaladas"
+        "name": "Filete de Ternera",
+        "price": "15.00",
+        "description": "Jugoso filete a la parrilla",
+        "category": "Carnes"
     }
 ]
+
+Asegúrate de que las categorías sean lo más específicas posibles según el plato (por ejemplo, "Pescados", "Pastas", "Ensaladas").
 
 Platos a procesar:
 {$itemsJson}
@@ -524,19 +540,26 @@ EOT;
         }
 
         return array_map(function($item) use ($requireDescriptionAndCategory) {
-            if (!isset($item['name']) || !isset($item['price'])) {
-                throw new \Exception('Missing required fields: name or price');
+            if (!isset($item['name']) || !isset($item['price']) || empty(trim($item['price']))) {
+                throw new \Exception('Missing or empty required fields: name or price');
             }
 
-            if ($requireDescriptionAndCategory && (!isset($item['description']) || !isset($item['category']))) {
-                throw new \Exception('Missing required fields: description or category');
+            // Validate price format
+            if (!preg_match('/^\d+(\.\d{1,2})?(-\d+(\.\d{1,2})?)?$/', $item['price'])) {
+                throw new \Exception('Invalid price format for item: ' . $item['name']);
+            }
+
+            if ($requireDescriptionAndCategory) {
+                if (!isset($item['description']) || !isset($item['category']) || empty(trim($item['description'])) || empty(trim($item['category']))) {
+                    throw new \Exception('Missing or empty required fields: description or category');
+                }
             }
 
             return [
                 'name' => trim($item['name']),
-                'price' => preg_replace('/[^0-9.]/', '', $item['price']),
+                'price' => preg_replace('/[^0-9\.\-]/', '', $item['price']),
                 'description' => trim($item['description'] ?? 'Sin descripción'),
-                'category' => trim($item['category'] ?? 'Sin Categoría')
+                'category' => trim($item['category'] ?? $this->assignCategory($item['name'], $item['description'], $this->keywords))
             ];
         }, $items);
     }
