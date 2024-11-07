@@ -47,8 +47,11 @@ class MenuOCRController extends Controller
             // Perform OCR
             $text = $this->performOCR($fullPath);
             
-            // Process text with OpenAI
-            $menuItems = $this->extractMenuItems($text);
+            // Phase 1: Extraction of Dishes and Prices
+            $extractedItems = $this->extractDishesAndPrices($text);
+            
+            // Phase 2: Generation of Descriptions and Categories
+            $menuItems = $this->generateDescriptionsAndCategories($extractedItems);
             
             // Save to database
             $savedItems = $this->saveMenuItems($menuItems);
@@ -103,54 +106,61 @@ class MenuOCRController extends Controller
 
     private function cleanText($text)
     {
-        // 1. Eliminar caracteres no imprimibles y símbolos gráficos
+        // 1. Basic cleaning (keep existing code)
         $text = preg_replace('/[\x00-\x1F\x7F-\x9F\x{2500}-\x{257F}]/u', '', $text);
-        $text = preg_replace('/[\x00-\x1F\x7F-\x9F]/u', '', $text);
         
-        // Replace multiple spaces/newlines with single ones
+        // 2. Replace special characters with spaces
+        $text = str_replace(['_', '/', '\\'], ' ', $text);
+        
+        // 3. Normalize spaces and line breaks
         $text = preg_replace('/\s+/', ' ', $text);
-        
         $text = preg_replace('/\s*([-,:;.])\s*/', '$1', $text);
-
-        // 4. Normalizar precios
+        
+        // 4. Format prices
         $text = preg_replace('/(\d+)(?:[.,](\d{2}))?\s*(?:[€$]|[\p{Sc}])?\s*-\s*(\d+)(?:[.,](\d{2}))?\s*(?:[€$]|[\p{Sc}])?/u', '$1.$2-$3.$4', $text);
         $text = preg_replace('/(\d+)[.,](\d{2})\s*(?:[€$]|[\p{Sc}])?/u', '$1.$2', $text);
-
-        // 5. Eliminar texto que se repite mucho
-        $text = preg_replace('/\*+/', '*', $text);
-
-        // Reglas importantes para las descripciones:
-        $text = preg_replace('/[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ\s\*\-\.,]/u', '', $text);
-
+        
+        // 5. Separate items with newlines when price is followed by text
+        $text = preg_replace('/(\d+[\.,]\d{0,2}\s*(?:€|USD)?)\s*([a-zA-Z])/', "$1\n$2", $text);
+        
+        // 6. Remove common non-menu words
+        $commonWords = ['unidad', 'informacion', 'alergenos', 'precios expresados', 'iva incluido', 'guarnicion'];
+        $text = preg_replace('/\b(' . implode('|', $commonWords) . ')\b/iu', '', $text);
+        
+        // 7. Clean up final text
+        $text = preg_replace('/[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ\s\*\-\.,\n]/u', '', $text);
+        
         return trim($text);
     }
 
     private function buildOpenAIPrompt($text, $attempt = 0)
     {
-        // Add variation based on retry attempt
-        $variation = ($attempt > 0) 
-            ? "\n(Intento {$attempt} - IMPORTANTE: Genera SOLO JSON válido)" 
-            : "";
+        $variation = match ($attempt) {
+            0 => "",
+            1 => "\n(Segundo intento: Asegúrate de identificar cada plato individual con su precio)",
+            2 => "\n(Último intento: Extrae SOLO platos que tengan un precio claro)",
+            default => ""
+        };
 
         return <<<EOT
-        Analiza este menú y devuelve SOLO un array JSON. Sin texto adicional.
+        Analiza este menú y extrae cada plato individual como un objeto JSON. IMPORTANTE:
 
+        1. Cada plato DEBE tener nombre y precio
+        2. El precio es el indicador principal de un plato nuevo
+        3. Si ves un precio, debe corresponder a UN SOLO plato
+        4. NO agrupes platos ni uses precios como rangos
+        5. Revisa si la descripcion es coherente con el platillo.
+        
+        Ejemplos correctos:
         [
-          {
-            "name": "Nombre del plato",
-            "price": "12.50",
-            "description": "Descripción breve",
-            "category": "Categoría"
-          }
+          {"name": "Hamburguesa Clásica", "price": "10.50", "description": "Jugosa hamburguesa con queso", "category": "Hamburguesas"},
+          {"name": "Ensalada César", "price": "8.00", "description": "Lechuga, pollo y aderezo", "category": "Ensaladas"}
         ]
 
-        Reglas:
-        1. Solo n��meros y punto decimal en precio
-        2. Nombre y precio son obligatorios
-        3. Genera descripción si falta
-        4. Categoriza los platos
+        Ejemplos INCORRECTOS:
+        ❌ {"name": "Ensalada mixta con guarnición", "price": "8.00, 10.00"} // NO múltiples precios
 
-        Menú:{$variation}
+        Menú a procesar:{$variation}
         {$text}
         EOT;
     }
@@ -163,8 +173,11 @@ class MenuOCRController extends Controller
 
         while ($attempt < $maxRetries) {
             try {
-                $prompt = $this->buildOpenAIPrompt($text, $attempt);
-                Log::debug('Sending prompt to OpenAI:', ['attempt' => $attempt + 1, 'prompt' => $prompt]);
+                // Modify text slightly on retries
+                $processedText = $this->processTextForAttempt($text, $attempt);
+                $prompt = $this->buildOpenAIPrompt($processedText, $attempt);
+                
+                Log::debug('Attempt ' . ($attempt + 1) . ' text:', ['text' => $processedText]);
 
                 $response = $this->openai->chat()->create([
                     'model' => 'gpt-3.5-turbo',
@@ -204,7 +217,8 @@ class MenuOCRController extends Controller
 
                 $attempt++;
                 if ($attempt >= $maxRetries) {
-                    throw new \Exception("Failed after {$maxRetries} attempts: {$lastError}");
+                    // Try fallback parser as last resort
+                    return $this->fallbackParser($text);
                 }
 
                 sleep(1);
@@ -212,45 +226,49 @@ class MenuOCRController extends Controller
         }
     }
 
-    private function cleanAndValidateJSON($content)
+    private function processTextForAttempt($text, $attempt)
     {
-        // Remove any text before first '[' or '{'
-        $content = preg_replace('/^[^[{]*/s', '', $content);
-        
-        // Remove any text after last ']' or '}'
-        $content = preg_replace('/[^\]\}]+$/s', '', $content);
-
-        // If content starts with '{', wrap it in array
-        if (str_starts_with(trim($content), '{')) {
-            $content = '[' . $content . ']';
-        }
-
-        // Ensure it's a valid JSON array structure
-        if (!preg_match('/^\s*\[[\s\S]*\]\s*$/', $content)) {
-            throw new \Exception('Invalid JSON array structure');
-        }
-
-        return $content;
+        return match ($attempt) {
+            0 => $text,
+            1 => $this->addLineBreaksAfterPrices($text),
+            2 => $this->simplifyText($text),
+            default => $text
+        };
     }
 
-    private function validateMenuItems($items)
+    private function addLineBreaksAfterPrices($text)
     {
-        if (!is_array($items) || empty($items)) {
-            throw new \Exception('No menu items found in response');
-        }
+        return preg_replace('/(\d+\.\d{2})\s+/', "$1\n", $text);
+    }
 
-        return array_map(function($item) {
-            if (!isset($item['name']) || !isset($item['price'])) {
-                throw new \Exception('Missing required fields');
+    private function simplifyText($text)
+    {
+        // Keep only lines with clear price patterns
+        $lines = explode("\n", $text);
+        $filtered = array_filter($lines, function($line) {
+            return preg_match('/\d+\.\d{2}/', $line);
+        });
+        return implode("\n", $filtered);
+    }
+
+    private function fallbackParser($text)
+    {
+        // Simple regex-based parser as last resort
+        $items = [];
+        $lines = explode("\n", $text);
+        
+        foreach ($lines as $line) {
+            if (preg_match('/(.+?)\s*(\d+\.\d{2})/', $line, $matches)) {
+                $items[] = [
+                    'name' => trim($matches[1]),
+                    'price' => $matches[2],
+                    'description' => 'Sin descripción',
+                    'category' => 'Sin Categoría'
+                ];
             }
-
-            return [
-                'name' => trim($item['name']),
-                'price' => preg_replace('/[^0-9.]/', '', $item['price']),
-                'description' => $item['description'] ?? 'Sin descripción',
-                'category' => $item['category'] ?? 'Sin Categoría'
-            ];
-        }, $items);
+        }
+        
+        return $items;
     }
 
     private $keywords = [
@@ -306,6 +324,256 @@ class MenuOCRController extends Controller
 
         return $savedItems;
     }
+
+    private function extractDishesAndPrices($text)
+    {
+        $maxRetries = 3;
+        $attempt = 0;
+        $lastError = null;
+
+        while ($attempt < $maxRetries) {
+            try {
+                $prompt = $this->buildExtractionPrompt($text, $attempt);
+                Log::debug('Sending extraction prompt to OpenAI:', ['attempt' => $attempt + 1, 'prompt' => $prompt]);
+
+                $response = $this->openai->chat()->create([
+                    'model' => 'gpt-3.5-turbo',
+                    'messages' => [
+                        [
+                            'role' => 'system',
+                            'content' => 'Eres un parser de menús. Devuelve SOLO JSON válido.'
+                        ],
+                        ['role' => 'user', 'content' => $prompt]
+                    ],
+                    'temperature' => $attempt > 0 ? 0.5 : 0.3,
+                    'max_tokens' => 2000
+                ]);
+
+                $content = $response->choices[0]->message->content;
+                Log::debug('Raw OpenAI extraction response:', ['content' => $content]);
+
+                // Clean and validate JSON
+                $content = $this->cleanAndValidateJSON($content);
+                Log::debug('Cleaned JSON:', ['content' => $content]);
+
+                $extractedItems = json_decode($content, true);
+
+                if (json_last_error() !== JSON_ERROR_NONE) {
+                    throw new \Exception('JSON decode error: ' . json_last_error_msg());
+                }
+
+                // Validate extracted items
+                return $this->validateMenuItems($extractedItems);
+
+            } catch (\Exception $e) {
+                $lastError = $e->getMessage();
+                Log::error('Extraction attempt ' . ($attempt + 1) . ' failed:', [
+                    'error' => $lastError,
+                    'response' => $content ?? null
+                ]);
+
+                $attempt++;
+                if ($attempt >= $maxRetries) {
+                    Log::warning('Usando fallback parser para extracción de platos y precios.');
+                    $fallbackItems = $this->fallbackParser($text);
+                    return array_map(function ($item) {
+                        return ['name' => $item['name'], 'price' => $item['price']];
+                    }, $fallbackItems);
+                }
+
+                sleep(1);
+            }
+        }
+    }
+
+    private function buildExtractionPrompt($text, $attempt = 0)
+    {
+        $variation = match ($attempt) {
+            0 => "",
+            1 => "\n(Segundo intento: Un plato SIEMPRE tiene precio. Separa cada plato y su precio.)",
+            2 => "\n(Último intento: Extrae SOLO platos que tengan un precio claro.)",
+            default => ""
+        };
+
+        return <<<EOT
+Extrae ÚNICAMENTE los nombres de los platos y sus precios del siguiente menú. Devuelve un array JSON con la siguiente estructura:
+
+[
+  {"name": "Nombre del plato", "price": "Precio"},
+  {"name": "Otro plato", "price": "Precio"}
+]
+
+Instrucciones:
+* El precio es el indicador principal de un nuevo plato.
+* Un plato SIEMPRE tiene un precio. Si un elemento no tiene precio, NO es un plato.
+* NO incluyas descripciones ni categorías en esta fase.
+* Si no estás seguro de si un elemento es un plato, omítelo. Es mejor omitir un plato que incluir información incorrecta.
+* Precios: pueden ser números (10), decimales (10.50) o rangos (10-12), con o sin símbolo de moneda.
+
+Menú:{$variation}
+{$text}
+EOT;
+    }
+
+    private function validateExtractedItems($items)
+    {
+        if (!is_array($items) || empty($items)) {
+            throw new \Exception('No dish items found in extraction response');
+        }
+
+        foreach ($items as $item) {
+            if (!isset($item['name']) || !isset($item['price'])) {
+                throw new \Exception('Missing required fields in extraction');
+            }
+        }
+
+        return $items;
+    }
+
+    private function generateDescriptionsAndCategories($extractedItems)
+    {
+        // Debug input items
+        Log::debug('Input items for descriptions:', ['items' => $extractedItems]);
+
+        $prompt = $this->buildDescriptionPrompt($extractedItems);
+        Log::debug('Sending description prompt to OpenAI:', ['prompt' => $prompt]);
+
+        $response = $this->openai->chat()->create([
+            'model' => 'gpt-3.5-turbo',
+            'messages' => [
+                [
+                    'role' => 'system',
+                    'content' => 'Genera descripciones y categorías SOLO en formato JSON válido.'
+                ],
+                ['role' => 'user', 'content' => $prompt]
+            ],
+            'temperature' => 0.5, // Adjusted for better balance
+            'max_tokens' => 3000
+        ]);
+
+        $content = $response->choices[0]->message->content;
+        Log::debug('Raw OpenAI description response:', ['content' => $content]);
+
+        try {
+            // Clean and validate JSON
+            $content = $this->cleanAndValidateJSON($content);
+            Log::debug('Cleaned JSON:', ['content' => $content]);
+            
+            // Use JSON_THROW_ON_ERROR for better error messages
+            $menuItems = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
+            
+            return $this->validateMenuItems($menuItems, true);
+        } catch (\JsonException $e) {
+            Log::error('JSON parsing failed:', [
+                'error' => $e->getMessage(),
+                'raw_content' => $content,
+                'response' => $response->choices[0]->message->content
+            ]);
+            throw $e;
+        }
+    }
+
+    private function buildDescriptionPrompt($extractedItems)
+    {
+        $itemsJson = json_encode($extractedItems, JSON_PRETTY_PRINT);
+
+        return <<<EOT
+Genera descripciones concisas (máximo 50 caracteres) y categorías para los siguientes platos. 
+Asegúrate de que la respuesta sea un array JSON válido con los campos "name", "price", "description" y "category" para cada plato.
+
+Platos a procesar:
+{$itemsJson}
+EOT;
+    }
+
+    private function validateMenuItems($items, $requireDescriptionAndCategory = false)
+    {
+        if (!is_array($items) || empty($items)) {
+            throw new \Exception('No menu items found in response');
+        }
+
+        return array_map(function($item) use ($requireDescriptionAndCategory) {
+            if (!isset($item['name']) || !isset($item['price'])) {
+                throw new \Exception('Missing required fields: name or price');
+            }
+
+            if ($requireDescriptionAndCategory && (!isset($item['description']) || !isset($item['category']))) {
+                throw new \Exception('Missing required fields: description or category');
+            }
+
+            return [
+                'name' => trim($item['name']),
+                'price' => preg_replace('/[^0-9.]/', '', $item['price']),
+                'description' => trim($item['description'] ?? 'Sin descripción'),
+                'category' => trim($item['category'] ?? 'Sin Categoría')
+            ];
+        }, $items);
+    }
+
+    private function cleanAndValidateJSON($content)
+    {
+        Log::debug('Raw content before any cleaning:', ['content' => $content]);
+        
+        // Remove control characters and non-printable characters
+        $content = preg_replace('/[\x00-\x1F\x7F\xA0]/u', '', $content);
+        
+        // Extract JSON array pattern
+        if (!preg_match('/\[\s*\{.*\}\s*\]/s', $content, $matches)) {
+            // Try more aggressive extraction if first attempt fails
+            if (!preg_match('/\{.*\}/s', $content, $matches)) {
+                throw new \Exception('No se encontró ninguna estructura JSON válida (ni array ni objeto): ' . 
+                    substr($content, 0, 200) . '...');
+            }
+            Log::debug('Found single object, wrapping in array');
+            $content = '[' . $matches[0] . ']';
+        } else {
+            $content = $matches[0];
+        }
+        
+        // Remove any remaining whitespace outside of strings
+        $content = preg_replace('/\s+(?=([^"]*"[^"]*")*[^"]*$)/', '', $content);
+        
+        // Verify structure
+        if (!$this->checkBracketBalance($content)) {
+            throw new \Exception('JSON tiene llaves o corchetes desbalanceados: ' . $content);
+        }
+
+        return $content;
+    }
+
+    private function checkBracketBalance($json): bool 
+    {
+        $stack = [];
+        $pairs = [
+            '{' => '}',
+            '[' => ']'
+        ];
+        
+        for ($i = 0; $i < strlen($json); $i++) {
+            $char = $json[$i];
+            if (in_array($char, ['{', '['])) {
+                $stack[] = $char;
+            } elseif (in_array($char, ['}', ']'])) {
+                if (empty($stack)) {
+                    return false;
+                }
+                $last = array_pop($stack);
+                if ($pairs[$last] !== $char) {
+                    return false;
+                }
+            }
+        }
+        
+        return empty($stack);
+    }
+
+    private function fixCommonJsonErrors($json)
+    {
+        // Fix unescaped quotes within JSON strings
+        $json = preg_replace('/([^\\])\\\"/', '$1\\\\"', $json);
+        return $json;
+    }
+   
 }
 
 
