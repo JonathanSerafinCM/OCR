@@ -10,7 +10,6 @@ class AddMissingColumnsToMenusTable extends Migration
     {
         Schema::table('menus', function (Blueprint $table) {
             // $table->string('name')->nullable(); // Elimina si fue añadido antes
-            $table->string('dish_name')->nullable(); // Asegura que 'dish_name' se añade
             $table->string('subcategory')->nullable();
             $table->string('discount')->nullable();
             $table->text('additional_details')->nullable();

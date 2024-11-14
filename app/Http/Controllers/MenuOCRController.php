@@ -299,33 +299,27 @@ class MenuOCRController extends Controller
         $savedItems = [];
         
         foreach ($menuItems as $item) {
-            $category = $item['category'] ?? null;
-            
-            if (!$category) {
-                $assignedCategory = $this->assignCategory($item['name'], $item['description'], $this->keywords);
-                if ($assignedCategory) {
-                    $category = $assignedCategory;
-                } else {
-                    $category = 'Sin Categoría';
-                }
-            }
-
-            // Verifica si dish_name existe ANTES de intentar insertar
-            if (isset($item['name']) && !empty(trim($item['name']))) { 
+            if (isset($item['name']) && !empty(trim($item['name']))) {
+                // Analyze dish for allergens
+                $allergens = $this->analyzeDishForAllergens($item['name'], $item['description'] ?? '');
+                
                 $savedItems[] = Menu::create([
-                    'dish_name' => $item['name'], // Changed from 'name' to 'dish_name'
-
+                    'dish_name' => $item['name'],
                     'price' => $item['price'],
                     'description' => $item['description'] ?? null,
-                    'category' => $category
+                    'category' => $item['category'] ?? 'Sin Categoría',
+                    'allergens' => json_encode($allergens) // Store allergens as JSON
                 ]);
             } else {
-                // Maneja la ausencia de dish_name
                 Log::warning('Platillo omitido, sin nombre:', ['dish' => $item]);
             }
         }
 
-        return $savedItems;
+        return array_map(function($item) {
+            $data = $item->toArray();
+            $data['allergens'] = json_decode($data['allergens'] ?? '[]');
+            return $data;
+        }, $savedItems);
     }
 
     private function extractDishesAndPrices($text)
@@ -507,25 +501,29 @@ EOT;
         };
 
         return <<<EOT
-Necesito que agregues descripciones breves (máximo 50 caracteres) y categorías específicas a los siguientes platos. Devuelve un array JSON válido donde para cada objeto agregues los campos "description" y "category" a los existentes.
+Necesito que agregues descripciones breves (máximo 50 caracteres), categorías específicas y alérgenos a los siguientes platos. Devuelve un array JSON válido donde para cada objeto agregues los campos "description", "category" y "allergens" a los existentes.
 
 Ejemplo de salida esperada:
 [
     {
-        "name": "Sopa de Tomate",
+        "name": "Sopa de Tomate sin gluten",
         "price": "5.50",
         "description": "Sopa casera de tomates frescos",
-        "category": "Sopas"
+        "category": "Sopas",
+        "allergens": ["Tomate"]
     },
     {
         "name": "Filete de Ternera",
         "price": "15.00",
         "description": "Jugoso filete a la parrilla",
-        "category": "Carnes"
+        "category": "Carnes",
+        "allergens": ["Carne de ternera"]
     }
 ]
 
-Asegúrate de que las categorías sean lo más específicas posibles según el plato (por ejemplo, "Pescados", "Pastas", "Ensaladas").
+Si un platillo no contiene alérgenos identificados, incluye una lista vacía en "allergens".
+
+Asegúrate de que las categorías sean lo más específicas posibles según el plato (por ejemplo, "Pescados", "Pastas", "Ensaladas"). Analiza el nombre y la descripción del platillo para identificar los alérgenos, considerando indicaciones como "sin gluten" para excluir ese alérgeno.
 
 Platos a procesar:
 {$itemsJson}
@@ -553,13 +551,17 @@ EOT;
                 if (!isset($item['description']) || !isset($item['category']) || empty(trim($item['description'])) || empty(trim($item['category']))) {
                     throw new \Exception('Missing or empty required fields: description or category');
                 }
+                if (!isset($item['allergens']) || !is_array($item['allergens'])) {
+                    throw new \Exception('Faltan los alérgenos en el platillo: ' . $item['name']);
+                }
             }
 
             return [
                 'name' => trim($item['name']),
                 'price' => preg_replace('/[^0-9\.\-]/', '', $item['price']),
                 'description' => trim($item['description'] ?? 'Sin descripción'),
-                'category' => trim($item['category'] ?? $this->assignCategory($item['name'], $item['description'], $this->keywords))
+                'category' => trim($item['category'] ?? $this->assignCategory($item['name'], $item['description'], $this->keywords)),
+                'allergens' => $item['allergens']
             ];
         }, $items);
     }
@@ -626,6 +628,45 @@ EOT;
         // Fix unescaped quotes within JSON strings
         $json = preg_replace('/([^\\])\\\"/', '$1\\\\"', $json);
         return $json;
+    }
+
+    private function analyzeDishForAllergens($name, $description) {
+        $allergens = [];
+        $allergenMap = [
+            'gluten' => ['pan', 'harina', 'trigo', 'pasta', 'coca'],
+            'pescado' => ['pescado', 'merluza', 'bacalao', 'salmón', 'dorada', 'atún', 'bonito'],
+            'crustáceos' => ['gamba', 'langostino', 'carabinero'],
+            'moluscos' => ['pulpo', 'calamar'],
+            'lácteos' => ['queso', 'leche', 'lácteo', 'mantequilla'],
+            'huevos' => ['huevo', 'tortilla'],
+            'frutos_secos' => ['frutos secos', 'piñones', 'nueces', 'almendras'],
+            'soja' => ['soja', 'salsa de soja'],
+            'mostaza' => ['mostaza'],
+            'apio' => ['apio'],
+            'sésamo' => ['sésamo', 'semillas de sésamo']
+        ];
+
+        // Check for "sin" prefixes that indicate allergen exclusion
+        $excludedAllergens = [];
+        if (preg_match_all('/sin\s+([a-zá-úñ]+)/i', $name . ' ' . $description, $matches)) {
+            $excludedAllergens = array_map('strtolower', $matches[1]);
+        }
+
+        foreach ($allergenMap as $allergen => $keywords) {
+            // Skip if this allergen is explicitly excluded
+            if (in_array($allergen, $excludedAllergens)) {
+                continue;
+            }
+
+            foreach ($keywords as $keyword) {
+                if (stripos($name, $keyword) !== false || stripos($description, $keyword) !== false) {
+                    $allergens[] = $allergen;
+                    break;
+                }
+            }
+        }
+
+        return array_unique($allergens);
     }
    
 }
