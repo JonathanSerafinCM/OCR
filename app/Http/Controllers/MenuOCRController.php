@@ -612,42 +612,69 @@ EOT;
         return $json;
     }
 
-    private function analyzeDishForAllergens($name, $description) {
+    private function analyzeDishForAllergens($name, $description) 
+    {
         $allergens = [];
+        
+        // Expanded allergen map with more specific terms
         $allergenMap = [
-            'gluten' => ['pan', 'harina', 'trigo', 'pasta', 'coca'],
-            'pescado' => ['pescado', 'merluza', 'bacalao', 'salmón', 'dorada', 'atún', 'bonito'],
-            'crustáceos' => ['gamba', 'langostino', 'carabinero'],
-            'moluscos' => ['pulpo', 'calamar'],
-            'lácteos' => ['queso', 'leche', 'lácteo', 'mantequilla'],
-            'huevos' => ['huevo', 'tortilla'],
-            'frutos_secos' => ['frutos secos', 'piñones', 'nueces', 'almendras'],
-            'soja' => ['soja', 'salsa de soja'],
+            'gluten' => [
+                'pan', 'harina', 'trigo', 'pasta', 'cebada', 'centeno', 
+                'avena', 'espelta', 'kamut', 'triticale', 'sémola', 'cuscús'
+            ],
+            'pescado' => [
+                'pescado', 'merluza', 'bacalao', 'salmón', 'dorada', 'atún',
+                'bonito', 'lubina', 'rape', 'sardina', 'boquerón'
+            ],
+            'crustáceos' => [
+                'gamba', 'langostino', 'carabinero', 'cigala', 'bogavante',
+                'cangrejo', 'nécora', 'percebe'
+            ],
+            'moluscos' => [
+                'pulpo', 'calamar', 'sepia', 'mejillón', 'almeja', 'berberecho',
+                'vieira', 'caracol'
+            ],
+            'lácteos' => [
+                'queso', 'leche', 'lácteo', 'mantequilla', 'nata', 'yogur',
+                'crema', 'caseína', 'requesón'
+            ],
+            'huevos' => ['huevo', 'tortilla', 'clara', 'yema', 'mayonesa'],
+            'frutos_secos' => [
+                'almendra', 'nuez', 'piñón', 'anacardo', 'avellana', 
+                'pistacho', 'cacahuete'
+            ],
+            'soja' => ['soja', 'salsa de soja', 'edamame', 'tofu'],
             'mostaza' => ['mostaza'],
             'apio' => ['apio'],
-            'sésamo' => ['sésamo', 'semillas de sésamo']
+            'sésamo' => ['sésamo', 'ajonjolí', 'tahini']
         ];
-
-        // Check for "sin" prefixes that indicate allergen exclusion
-        $excludedAllergens = [];
-        if (preg_match_all('/sin\s+([a-zá-úñ]+)/i', $name . ' ' . $description, $matches)) {
-            $excludedAllergens = array_map('strtolower', $matches[1]);
-        }
-
+    
+        // Negation words in Spanish
+        $negationWords = ['sin', 'no contiene', 'libre de'];
+        
+        $combinedText = mb_strtolower($name . ' ' . $description);
+    
         foreach ($allergenMap as $allergen => $keywords) {
-            // Skip if this allergen is explicitly excluded
-            if (in_array($allergen, $excludedAllergens)) {
-                continue;
-            }
-
             foreach ($keywords as $keyword) {
-                if (stripos($name, $keyword) !== false || stripos($description, $keyword) !== false) {
-                    $allergens[] = $allergen;
-                    break;
+                // Check for word boundaries using regex
+                if (preg_match('/\b' . preg_quote($keyword, '/') . '\b/u', $combinedText)) {
+                    // Check if keyword is negated
+                    $isNegated = false;
+                    foreach ($negationWords as $negation) {
+                        if (mb_strpos($combinedText, $negation . ' ' . $keyword) !== false) {
+                            $isNegated = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!$isNegated) {
+                        $allergens[] = $allergen;
+                        break; // Skip remaining keywords for this allergen
+                    }
                 }
             }
         }
-
+    
         return array_unique($allergens);
     }
    
