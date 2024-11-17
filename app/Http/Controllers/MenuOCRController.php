@@ -136,14 +136,15 @@ class MenuOCRController extends Controller
         return trim($text);
     }
 
-    private function buildOpenAIPrompt($text, $attempt = 0)
-    {
+    private function buildOpenAIPrompt($text, $attempt = 0, $category = null) {
         $variation = match ($attempt) {
             0 => "",
             1 => "\n(Segundo intento: Asegúrate de identificar cada plato individual con su precio)",
             2 => "\n(Último intento: Extrae SOLO platos que tengan un precio claro)",
             default => ""
         };
+
+        $categoryExample = $category ? ", \"category\": \"{$category}\"" : "";
 
         return <<<EOT
         Analiza este menú y extrae cada plato individual como un objeto JSON. IMPORTANTE:
@@ -156,12 +157,9 @@ class MenuOCRController extends Controller
         
         Ejemplos correctos:
         [
-          {"name": "Hamburguesa Clásica", "price": "10.50", "description": "Jugosa hamburguesa con queso", "category": "Hamburguesas"},
-          {"name": "Ensalada César", "price": "8.00", "description": "Lechuga, pollo y aderezo", "category": "Ensaladas"}
+          {"name": "Hamburguesa Clásica", "price": "10.50", "description": "Jugosa hamburguesa con queso"{$categoryExample}},
+          {"name": "Ensalada César", "price": "8.00"}
         ]
-
-        Ejemplos INCORRECTOS:
-        ❌ {"name": "Ensalada mixta con guarnición", "price": "8.00, 10.00"} // NO múltiples precios
 
         Menú a procesar:{$variation}
         {$text}
@@ -302,13 +300,13 @@ class MenuOCRController extends Controller
             if (isset($item['name']) && !empty(trim($item['name']))) {
                 // Analyze dish for allergens
                 $allergens = $this->analyzeDishForAllergens($item['name'], $item['description'] ?? '');
-                
+
                 $savedItems[] = Menu::create([
                     'dish_name' => $item['name'],
                     'price' => $item['price'],
                     'description' => $item['description'] ?? null,
                     'category' => $item['category'] ?? 'Sin Categoría',
-                    'allergens' => json_encode($allergens) // Store allergens as JSON
+                    'allergens' => $allergens // Store allergens directly
                 ]);
             } else {
                 Log::warning('Platillo omitido, sin nombre:', ['dish' => $item]);
@@ -317,7 +315,8 @@ class MenuOCRController extends Controller
 
         return array_map(function($item) {
             $data = $item->toArray();
-            $data['allergens'] = json_decode($data['allergens'] ?? '[]');
+            // Cast allergens to array if it's a string (for compatibility with existing data)
+            $data['allergens'] = is_string($data['allergens']) ? json_decode($data['allergens']) : $data['allergens'];
             return $data;
         }, $savedItems);
     }
@@ -438,8 +437,7 @@ EOT;
         return $items;
     }
 
-    private function generateDescriptionsAndCategories($extractedItems)
-    {
+    private function generateDescriptionsAndCategories($extractedItems) {
         $maxRetries = 3;
         $attempt = 0;
         $lastError = null;
@@ -490,45 +488,30 @@ EOT;
         }
     }
 
-    private function buildDescriptionPrompt($extractedItems, $attempt = 0)
-    {
+    private function buildDescriptionPrompt($extractedItems, $attempt = 0) {
         $itemsJson = json_encode($extractedItems, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
 
         $additionalInstructions = match ($attempt) {
-            1 => "\nAsegúrate de agregar descripciones y categorías adecuadas a cada plato.",
-            2 => "\nÚltimo intento: Por favor, sigue exactamente el formato y las instrucciones proporcionadas.",
+            1 => "\nAsegúrate de que la respuesta siga el formato especificado, incluyendo los campos \"description\", \"category\" y \"allergens\".",
+            2 => "\nÚltimo intento. Si no puedes generar la descripción o categoría, déjalas en blanco como \"Sin descripción\"/\"Sin categoría\", pero mantén la estructura JSON.",
             default => ""
         };
 
         return <<<EOT
-Necesito que agregues descripciones breves (máximo 50 caracteres), categorías específicas y alérgenos a los siguientes platos. Devuelve un array JSON válido donde para cada objeto agregues los campos "description", "category" y "allergens" a los existentes.
+        Genera descripciones concisas (máximo 50 caracteres) y categorías para los siguientes platos. Devuelve SOLO el array JSON con los campos "name", "price", "description", "category" y "allergens" (como array) para cada plato.
 
-Ejemplo de salida esperada:
-[
-    {
-        "name": "Sopa de Tomate sin gluten",
-        "price": "5.50",
-        "description": "Sopa casera de tomates frescos",
-        "category": "Sopas",
-        "allergens": ["Tomate"]
-    },
-    {
-        "name": "Filete de Ternera",
-        "price": "15.00",
-        "description": "Jugoso filete a la parrilla",
-        "category": "Carnes",
-        "allergens": ["Carne de ternera"]
-    }
-]
+        Ejemplos de alérgenos:
+        * "Tartar de salmón": ["Pescado"]
+        * "Ensalada con queso de cabra": ["Lácteos"]
+        * "Pasta con frutos secos": ["Gluten", "Frutos Secos"]
+        * "Pollo al ajillo": []
 
-Si un platillo no contiene alérgenos identificados, incluye una lista vacía en "allergens".
+        Si no puedes determinar los alérgenos, devuelve un array vacío.
 
-Asegúrate de que las categorías sean lo más específicas posibles según el plato (por ejemplo, "Pescados", "Pastas", "Ensaladas"). Analiza el nombre y la descripción del platillo para identificar los alérgenos, considerando indicaciones como "sin gluten" para excluir ese alérgeno.
-
-Platos a procesar:
-{$itemsJson}
-{$additionalInstructions}
-EOT;
+        Platos a procesar:
+        {$itemsJson}
+        {$additionalInstructions}
+        EOT;
     }
 
     private function validateMenuItems($items, $requireDescriptionAndCategory = false)
@@ -566,8 +549,7 @@ EOT;
         }, $items);
     }
 
-    private function cleanAndValidateJSON($content)
-    {
+    private function cleanAndValidateJSON($content) {
         Log::debug('Raw content before any cleaning:', ['content' => $content]);
         
         // Remove control characters and non-printable characters

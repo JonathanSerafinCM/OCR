@@ -17,6 +17,11 @@ class Menu extends Model
         'description',
         'special_notes',
         'discount',
-        'additional_details'
+        'additional_details',
+        'allergens'  // Add this line
+    ];
+
+    protected $casts = [
+        'allergens' => 'array'
     ];
 }
