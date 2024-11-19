@@ -840,6 +840,12 @@ EOT;
     public function showMenu()
     {
         $menuItems = Menu::all();
+        $userPreferences = $this->getUserPreferences(Auth::id());
+        
+        if ($userPreferences) {
+            $menuItems = $this->getRecommendedItems($menuItems->toArray(), $userPreferences);
+        }
+        
         return view('menu', compact('menuItems'));
     }
 
@@ -847,6 +853,25 @@ EOT;
     {
         $userPreferences = $this->getUserPreferences(Auth::id());
         return view('preferencias', compact('userPreferences'));
+    }
+
+    public function updatePreferences(Request $request)
+    {
+        $validated = $request->validate([
+            'dietary_restrictions' => 'nullable|array',
+            'favorite_tags' => 'nullable|array',
+        ]);
+
+        $preference = UserPreference::updateOrCreate(
+            ['user_id' => Auth::id()],
+            [
+                'dietary_restrictions' => $validated['dietary_restrictions'] ?? [],
+                'favorite_tags' => $validated['favorite_tags'] ?? [],
+            ]
+        );
+
+        return redirect()->route('preferencias')
+            ->with('status', 'preferences-updated');
     }
 }
 
