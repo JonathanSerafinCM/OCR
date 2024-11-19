@@ -16,7 +16,10 @@ RUN apt-get update && apt-get install -y \
     libzip-dev \
     default-mysql-client \
     dos2unix \
-    netcat-openbsd
+    netcat-openbsd \
+    # Añadir estas líneas para Node.js
+    nodejs \
+    npm
 
 # Instalar extensiones PHP
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg \

@@ -39,7 +39,11 @@ php artisan config:cache && echo "✓ Configuración en cache"
 php artisan route:clear && echo "✓ Rutas limpiadas"
 php artisan route:cache && echo "✓ Rutas en cache"
 php artisan migrate --force && echo "✓ Base de datos migrada"
-
+# Instalar dependencias de Node y compilar assets
+echo "📦 Instalando dependencias de Node.js..."
+npm install
+echo "🔨 Compilando assets..."
+npm run build
 # Start services
 echo "\n🚀 Iniciando servicios..."
 php-fpm &
