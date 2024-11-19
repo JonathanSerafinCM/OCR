@@ -9,6 +9,9 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use OpenAI;
+use App\Models\UserPreference;
+use App\Models\DishView;
+use Illuminate\Support\Facades\Auth;
 
 class MenuOCRController extends Controller
 {
@@ -53,14 +56,21 @@ class MenuOCRController extends Controller
             // Phase 2: Generation of Descriptions and Categories
             $menuItems = $this->generateDescriptionsAndCategories($extractedItems);
             
+            // Get user preferences if authenticated
+            $userPreferences = $this->getUserPreferences(Auth::id());
+
+            // Get personalized recommendations
+            $recommendedItems = $this->getRecommendedItems($menuItems, $userPreferences);
+
             // Save to database
             $savedItems = $this->saveMenuItems($menuItems);
 
             return response()->json([
                 'message' => 'Menu processed successfully',
                 'items_count' => count($savedItems),
-                'items' => $savedItems,
-                'raw_text' => app()->environment('local') ? $text : null
+                'items' => $recommendedItems,
+                'raw_text' => app()->environment('local') ? $text : null,
+                'personalized' => !is_null($userPreferences),
             ]);
 
         } catch (\Exception $e) {
@@ -677,7 +687,83 @@ EOT;
     
         return array_unique($allergens);
     }
-   
+
+    private function getUserPreferences($userId = null)
+    {
+        if (!$userId) {
+            return null;
+        }
+
+        $preferences = UserPreference::where('user_id', $userId)->first();
+
+        if ($preferences) {
+            return [
+                'dietary_restrictions' => $preferences->dietary_restrictions ?? [],
+                'favorite_tags' => $preferences->favorite_tags ?? [],
+                'order_history' => $preferences->order_history ?? [],
+            ];
+        }
+
+        return null;
+    }
+
+    private function getRecommendedItems(array $menuItems, ?array $userPreferences = null)
+    {
+        if (!$userPreferences) {
+            return $menuItems;
+        }
+
+        // Get user dietary restrictions and favorites
+        $restrictions = $userPreferences['dietary_restrictions'];
+        $favoriteTags = $userPreferences['favorite_tags'];
+        $previousOrders = $userPreferences['order_history'];
+
+        return array_map(function($item) use ($restrictions, $favoriteTags, $previousOrders) {
+            $score = 0;
+
+            // Check for dietary restrictions
+            if (!empty(array_intersect($restrictions, $item['allergens'] ?? []))) {
+                $item['not_recommended'] = true;
+            }
+
+            // Increase score for favorite categories
+            if (in_array($item['category'], $favoriteTags)) {
+                $score += 2;
+            }
+
+            // Increase score for previously ordered dishes
+            if (in_array($item['dish_name'], $previousOrders)) {
+                $score += 1;
+            }
+
+            $item['recommendation_score'] = $score;
+            $item['personalized'] = true;
+
+            return $item;
+        }, $menuItems);
+    }
+
+    public function recordDishView(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'dish_id' => 'required|integer|exists:menus,id',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'error' => 'Validation failed',
+                'details' => $validator->errors()
+            ], 422);
+        }
+
+        DishView::create([
+            'user_id' => Auth::id(),
+            'dish_id' => $request->input('dish_id'),
+            'viewed_at' => now(),
+        ]);
+
+        return response()->json(['message' => 'Dish view recorded']);
+    }
 }
 
 
