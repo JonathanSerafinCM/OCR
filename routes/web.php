@@ -16,6 +16,9 @@ Route::middleware(['auth'])->group(function () {
         return view('dashboard');
     })->name('dashboard');
 
+    // Menu routes
+    Route::get('/menu', [MenuOCRController::class, 'showMenu'])->name('menu'); // Añade esta línea
+
     // Preferencias routes
     Route::get('/preferencias', [MenuOCRController::class, 'showPreferences'])->name('preferencias');
     Route::put('/preferencias', [MenuOCRController::class, 'updatePreferences'])->name('preferencias.update');
