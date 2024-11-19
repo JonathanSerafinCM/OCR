@@ -846,7 +846,8 @@ EOT;
             $menuItems = $this->getRecommendedItems($menuItems->toArray(), $userPreferences);
         }
         
-        return view('menu', compact('menuItems'));
+        // Agrega 'userPreferences' al array de variables que pasas a la vista
+        return view('menu', compact('menuItems', 'userPreferences'));
     }
 
     public function showPreferences()
