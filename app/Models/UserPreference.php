@@ -55,4 +55,29 @@ class UserPreference extends Model
             $this->save();
         }
     }
+
+    public static function getPopularCategories($limit = 5)
+    {
+        return self::select('favorite_tags')
+            ->whereNotNull('favorite_tags')
+            ->get()
+            ->flatMap(function ($pref) {
+                return $pref->favorite_tags;
+            })
+            ->countBy()
+            ->sortDesc()
+            ->take($limit);
+    }
+
+    public static function getCommonRestrictions()
+    {
+        return self::select('dietary_restrictions')
+            ->whereNotNull('dietary_restrictions')
+            ->get()
+            ->flatMap(function ($pref) {
+                return $pref->dietary_restrictions;
+            })
+            ->countBy()
+            ->sortDesc();
+    }
 }

@@ -71,4 +71,33 @@ class DishView extends Model
             ->limit($limit)
             ->get();
     }
+
+    public static function getPopularDishes($days = 30, $limit = 10)
+    {
+        return self::select('dish_id')
+            ->with('dish')
+            ->where('viewed_at', '>=', now()->subDays($days))
+            ->groupBy('dish_id')
+            ->orderByRaw('COUNT(*) DESC')
+            ->limit($limit)
+            ->get()
+            ->map(function ($view) {
+                return [
+                    'dish' => $view->dish,
+                    'views' => $view->views_count,
+                    'last_viewed' => $view->last_viewed
+                ];
+            });
+    }
+
+    public static function getTrendingDishes($hours = 24, $limit = 5)
+    {
+        return self::select('dish_id')
+            ->with('dish')
+            ->where('viewed_at', '>=', now()->subHours($hours))
+            ->groupBy('dish_id')
+            ->orderByRaw('COUNT(*) DESC')
+            ->limit($limit)
+            ->get();
+    }
 }

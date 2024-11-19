@@ -713,34 +713,106 @@ EOT;
             return $menuItems;
         }
 
-        // Get user dietary restrictions and favorites
-        $restrictions = $userPreferences['dietary_restrictions'];
-        $favoriteTags = $userPreferences['favorite_tags'];
-        $previousOrders = $userPreferences['order_history'];
+        $restrictions = $userPreferences['dietary_restrictions'] ?? [];
+        $favoriteTags = $userPreferences['favorite_tags'] ?? [];
+        $previousOrders = $userPreferences['order_history'] ?? [];
 
-        return array_map(function($item) use ($restrictions, $favoriteTags, $previousOrders) {
+        // Convert to collection for easier manipulation
+        $items = collect($menuItems)->map(function($item) use ($restrictions, $favoriteTags, $previousOrders) {
             $score = 0;
 
-            // Check for dietary restrictions
+            // Check dietary restrictions
             if (!empty(array_intersect($restrictions, $item['allergens'] ?? []))) {
                 $item['not_recommended'] = true;
+                $score -= 10; // Heavy penalty for restricted items
             }
 
-            // Increase score for favorite categories
+            // Score based on category matches
             if (in_array($item['category'], $favoriteTags)) {
+                $score += 3;
+            }
+
+            // Score based on previous orders
+            if (in_array($item['dish_name'], $previousOrders)) {
                 $score += 2;
             }
 
-            // Increase score for previously ordered dishes
-            if (in_array($item['dish_name'], $previousOrders)) {
-                $score += 1;
-            }
+            // Add tags matching (if available)
+            $itemTags = $item['tags'] ?? [];
+            $matchingTags = array_intersect($itemTags, $favoriteTags);
+            $score += count($matchingTags) * 2;
 
             $item['recommendation_score'] = $score;
             $item['personalized'] = true;
 
             return $item;
-        }, $menuItems);
+        });
+
+        // Sort by score and move restricted items to end
+        $sorted = $items->sortByDesc('recommendation_score')
+            ->sortBy(function ($item) {
+                return isset($item['not_recommended']) && $item['not_recommended'] ? 1 : 0;
+            });
+
+        return $sorted->values()->all();
+    }
+
+    public function filterMenuItems(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'min_price' => 'nullable|numeric|min:0',
+            'max_price' => 'nullable|numeric|min:0',
+            'category' => 'nullable|string',
+            'restrictions' => 'nullable|array'
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['error' => $validator->errors()], 422);
+        }
+
+        $minPrice = $request->input('min_price', 0);
+        $maxPrice = $request->input('max_price', 999999);
+        $category = $request->input('category');
+        
+        try {
+            $query = Menu::query();
+
+            // Apply price filter
+            $query->where(function($q) use ($minPrice, $maxPrice) {
+                $q->where(function($sub) use ($minPrice, $maxPrice) {
+                    // Handle single prices
+                    $sub->whereRaw('CAST(REGEXP_REPLACE(price, "[^0-9.]", "") AS DECIMAL(10,2)) >= ?', [$minPrice])
+                        ->whereRaw('CAST(REGEXP_REPLACE(price, "[^0-9.]", "") AS DECIMAL(10,2)) <= ?', [$maxPrice]);
+                })->orWhere(function($sub) use ($minPrice, $maxPrice) {
+                    // Handle price ranges
+                    $sub->whereRaw('CAST(SUBSTRING_INDEX(price, "-", 1) AS DECIMAL(10,2)) >= ?', [$minPrice])
+                        ->whereRaw('CAST(SUBSTRING_INDEX(price, "-", -1) AS DECIMAL(10,2)) <= ?', [$maxPrice]);
+                });
+            });
+
+            // Apply category filter
+            if ($category) {
+                $query->where('category', $category);
+            }
+
+            $menuItems = $query->get();
+
+            // Get user preferences if authenticated
+            $userPreferences = Auth::check() ? $this->getUserPreferences(Auth::id()) : null;
+            
+            // Apply recommendations
+            $recommendedItems = $this->getRecommendedItems($menuItems->toArray(), $userPreferences);
+
+            return response()->json([
+                'items' => $recommendedItems,
+                'filtered_count' => count($recommendedItems),
+                'personalized' => !is_null($userPreferences)
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Menu filtering failed', ['error' => $e->getMessage()]);
+            return response()->json(['error' => 'Error filtering menu items'], 500);
+        }
     }
 
     public function recordDishView(Request $request)
@@ -763,6 +835,18 @@ EOT;
         ]);
 
         return response()->json(['message' => 'Dish view recorded']);
+    }
+
+    public function showMenu()
+    {
+        $menuItems = Menu::all();
+        return view('menu', compact('menuItems'));
+    }
+
+    public function showPreferences()
+    {
+        $userPreferences = $this->getUserPreferences(Auth::id());
+        return view('preferencias', compact('userPreferences'));
     }
 }
 
