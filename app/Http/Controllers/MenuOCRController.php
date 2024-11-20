@@ -85,6 +85,20 @@ class MenuOCRController extends Controller
             ], 500);
         }
     }
+    public function showMenu()
+    {
+        // Obtener todos los elementos del menú desde la base de datos
+        $menuItems = Menu::all()->toArray();
+
+        // Obtener las preferencias del usuario autenticado
+        $userPreferences = $this->getUserPreferences(Auth::id());
+
+        // Obtener recomendaciones personalizadas
+        $menuItems = $this->getRecommendedItems($menuItems, $userPreferences);
+
+        // Pasar las variables a la vista
+        return view('menu', compact('menuItems', 'userPreferences'));
+    }
 
     private function convertPdfToImage($pdfPath)
     {
@@ -446,6 +460,14 @@ EOT;
 
         return $items;
     }
+    public function showPreferences()
+    {
+        // Obtener las preferencias del usuario
+        $userPreferences = $this->getUserPreferences(Auth::id());
+    
+        // Pasar las preferencias a la vista
+        return view('preferencias', ['userPreferences' => $userPreferences]);
+    }
 
     private function generateDescriptionsAndCategories($extractedItems) {
         $maxRetries = 3;
@@ -712,105 +734,98 @@ EOT;
         if (!$userPreferences) {
             return $menuItems;
         }
-
+    
         $restrictions = $userPreferences['dietary_restrictions'] ?? [];
         $favoriteTags = $userPreferences['favorite_tags'] ?? [];
         $previousOrders = $userPreferences['order_history'] ?? [];
-
-        // Mapa de equivalencias entre restricciones dietéticas y alérgenos
+    
+        // Mapa de equivalencias para alergenos
         $allergenEquivalence = [
             'gluten' => ['gluten'],
             'lácteos' => ['lácteos'],
             'frutos secos' => ['frutos_secos'],
             'pescado' => ['pescado'],
-            'mariscos' => ['pescado', 'crustáceos', 'moluscos'], // Agrega "pescado" aquí
-            'huevos' => ['huevos'],
-            // Agrega más restricciones si es necesario
+            'mariscos' => ['pescado', 'crustáceos', 'moluscos'],
+            'huevos' => ['huevos']
         ];
-
-        // Obtener la lista de alérgenos a excluir
-        $allergensToExclude = [];
-        foreach ($restrictions as $restriction) {
-            $normalizedRestriction = strtolower(trim($restriction));
-            if (isset($allergenEquivalence[$normalizedRestriction])) {
-                $allergensToExclude = array_merge($allergensToExclude, $allergenEquivalence[$normalizedRestriction]);
-            } else {
-                $allergensToExclude[] = $normalizedRestriction;
-            }
-        }
-
-        // Normalizar los alérgenos a excluir
-        $allergensToExclude = array_map('strtolower', $allergensToExclude);
-
-        // Filtrar los platillos excluyendo los alérgenos restringidos
-        $items = collect($menuItems)->filter(function($item) use ($allergensToExclude) {
-            // Normalizar los alérgenos del platillo
+    
+        // Mapa de equivalencias para categorías
+        $categoryMap = [
+            'entrante' => 'entradas',
+            'entrantes' => 'entradas',
+            'principal' => 'carnes',
+            'carne' => 'carnes',
+            'carnes' => 'carnes',
+            'pescado' => 'pescados',
+            'pescados' => 'pescados',
+            'ensalada' => 'ensaladas',
+            'ensaladas' => 'ensaladas',
+            'postre' => 'postres',
+            'postres' => 'postres',
+            'platos principales' => 'carnes'
+        ];
+    
+        $items = collect($menuItems)->map(function($item) use ($allergenEquivalence, $restrictions, $favoriteTags, $previousOrders, $categoryMap) {
+            // Normalizar alérgenos
             $itemAllergens = array_map('strtolower', $item['allergens'] ?? []);
-
-            // Excluir platillos que contengan alérgenos restringidos
-            return empty(array_intersect($allergensToExclude, $itemAllergens));
-        });
-
-        // Si después de filtrar por alérgenos no hay platillos, devolver vacío
-        if ($items->isEmpty()) {
-            return [];
-        }
-
-        // Aplicar filtrado por etiquetas favoritas si existen
-        if (!empty($favoriteTags)) {
-            $itemsByFavorites = $items->filter(function($item) use ($favoriteTags) {
-                $itemCategory = strtolower(trim($item['category'] ?? ''));
-
-                // Mapear categorías comunes
-                $categoryMap = [
-                    'entrante' => 'entradas',
-                    'entrantes' => 'entradas',
-                    'principal' => 'carnes',
-                    'carne' => 'carnes',
-                    'pescados y mariscos' => 'pescados',
-                    'pescado' => 'pescados',
-                    'ensalada' => 'ensaladas',
-                    'postre' => 'postres',
-                    // Agrega más mapeos si es necesario
-                ];
-
-                // Normalizar la categoría del item
-                if (isset($categoryMap[$itemCategory])) {
-                    $itemCategory = $categoryMap[$itemCategory];
-                }
-
-                $normalizedFavoriteTags = array_map('strtolower', $favoriteTags);
-
-                return in_array($itemCategory, $normalizedFavoriteTags);
-            });
-
-            // Si hay platillos que coinciden con las etiquetas favoritas, usar esos
-            if ($itemsByFavorites->isNotEmpty()) {
-                $items = $itemsByFavorites;
-            }
-            // Si no hay coincidencias, continuar con los platillos filtrados solo por alérgenos
-        }
-
-        // Calcular puntuaciones de recomendación
-        $items = $items->map(function($item) use ($favoriteTags, $previousOrders) {
+            
+            // Verificar alérgenos restringidos
+            $restrictedAllergens = collect($restrictions)->flatMap(function($restriction) use ($allergenEquivalence) {
+                return $allergenEquivalence[strtolower($restriction)] ?? [$restriction];
+            })->toArray();
+            $item['has_allergens'] = !empty(array_intersect($restrictedAllergens, $itemAllergens));
+    
+            // Normalizar categoría
+            $itemCategory = strtolower(trim($item['category'] ?? ''));
+            $normalizedCategory = $categoryMap[$itemCategory] ?? $itemCategory;
+            
+            // Normalizar categorías favoritas
+            $normalizedFavoriteTags = collect($favoriteTags)->map(function($tag) {
+                return strtolower(trim($tag));
+            })->toArray();
+    
+            $item['is_favorite'] = in_array($normalizedCategory, $normalizedFavoriteTags);
+            $item['normalized_category'] = $normalizedCategory;
+    
+            // Calcular puntuación
             $score = 0;
-
-            // Puntuación basada en categoría
-            if (in_array(strtolower($item['category']), array_map('strtolower', $favoriteTags))) {
+            if ($item['is_favorite']) {
                 $score += 5;
             }
-
-            // Puntuación basada en pedidos previos
             if (in_array($item['dish_name'], $previousOrders)) {
                 $score += 2;
             }
-
             $item['recommendation_score'] = $score;
+    
             return $item;
-        })->sortByDesc('recommendation_score');
-
-        return $items->values()->all();
+        });
+    
+        // Ordenar: favoritos primero, luego por puntuación
+        return $items->sortByDesc(function($item) {
+            return [$item['is_favorite'], $item['recommendation_score']];
+        })->values()->all();
     }
+public function updatePreferences(Request $request)
+{
+    $validated = $request->validate([
+        'dietary_restrictions' => 'nullable|array',
+        'favorite_tags' => 'nullable|array',
+        'dietary_restrictions.*' => 'string',
+        'favorite_tags.*' => 'string'
+    ]);
+
+    // Actualizar o crear preferencias del usuario
+    $preferences = UserPreference::updateOrCreate(
+        ['user_id' => Auth::id()],
+        [
+            'dietary_restrictions' => $validated['dietary_restrictions'] ?? [],
+            'favorite_tags' => $validated['favorite_tags'] ?? [],
+        ]
+    );
+
+    return redirect()->route('preferencias')
+        ->with('status', 'preferences-updated');
+}
 
     public function filterMenuItems(Request $request)
     {
@@ -818,7 +833,8 @@ EOT;
             'min_price' => 'nullable|numeric|min:0',
             'max_price' => 'nullable|numeric|min:0',
             'category' => 'nullable|string',
-            'restrictions' => 'nullable|array'
+            'restrictions' => 'nullable|array',
+            'favorite_tags' => 'nullable|array'
         ]);
 
         if ($validator->fails()) {
@@ -838,85 +854,11 @@ EOT;
                     // Handle single prices
                     $sub->whereRaw('CAST(REGEXP_REPLACE(price, "[^0-9.]", "") AS DECIMAL(10,2)) >= ?', [$minPrice])
                         ->whereRaw('CAST(REGEXP_REPLACE(price, "[^0-9.]", "") AS DECIMAL(10,2)) <= ?', [$maxPrice]);
-                })->orWhere(function($sub) use ($minPrice, $maxPrice) {
-                    // Handle price ranges
-                    $sub->whereRaw('CAST(SUBSTRING_INDEX(price, "-", 1) AS DECIMAL(10,2)) >= ?', [$minPrice])
-                        ->whereRaw('CAST(SUBSTRING_INDEX(price, "-", -1) AS DECIMAL(10,2)) <= ?', [$maxPrice]);
                 });
             });
-
-            // Apply category filter
-            if ($category) {
-                $query->where('category', $category);
-            }
-
-            $menuItems = $query->get();
-
-            // Get user preferences if authenticated
-            $userPreferences = Auth::check() ? $this->getUserPreferences(Auth::id()) : null;
-            
-            // Apply recommendations
-            $recommendedItems = $this->getRecommendedItems($menuItems->toArray(), $userPreferences);
-
-            return response()->json([
-                'items' => $recommendedItems,
-                'filtered_count' => count($recommendedItems),
-                'personalized' => !is_null($userPreferences)
-            ]);
-
         } catch (\Exception $e) {
-            Log::error('Menu filtering failed', ['error' => $e->getMessage()]);
-            return response()->json(['error' => 'Error filtering menu items'], 500);
+            return response()->json(['error' => 'An error occurred while filtering menu items'], 500);
         }
-    }
-
-    public function recordDishView(Request $request)
-    {
-        $validator = Validator::make($request->all(), [
-            'dish_id' => 'required|integer|exists:menus,id',
-        ]);
-
-        if ($validator->fails()) {
-            return response()->json([
-                'error' => 'Validation failed',
-                'details' => $validator->errors()
-            ], 422);
-        }
-
-        DishView::create([
-            'user_id' => Auth::id(),
-            'dish_id' => $request->input('dish_id'),
-            'viewed_at' => now(),
-        ]);
-
-        return response()->json(['message' => 'Dish view recorded']);
-    }
-
-    public function showMenu()
-    {
-        $menuItems = Menu::all();
-        $userPreferences = $this->getUserPreferences(Auth::id());
-        
-        if ($userPreferences) {
-            $menuItems = $this->getRecommendedItems($menuItems->toArray(), $userPreferences);
-        }
-        
-        // Agrega 'userPreferences' al array de variables que pasas a la vista
-        return view('menu', compact('menuItems', 'userPreferences'));
-    }
-
-    public function showPreferences()
-    {
-        $userPreferences = $this->getUserPreferences(Auth::id());
-        return view('preferencias', compact('userPreferences'));
-    }
-
-    public function updatePreferences(Request $request)
-    {
-        $validated = $request->validate([
-            'dietary_restrictions' => 'nullable|array',
-            'favorite_tags' => 'nullable|array',
-        ]);
 
         $preference = UserPreference::updateOrCreate(
             ['user_id' => Auth::id()],

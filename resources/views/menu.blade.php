@@ -46,26 +46,41 @@
             <div class="bg-white overflow-hidden shadow-sm sm:rounded-lg">
                 <div class="p-6 text-gray-900">
                     @foreach($menuItems as $item)
-                        <div class="mb-6 p-4 border rounded-lg @if(isset($item['not_recommended']) && $item['not_recommended']) bg-red-50 @elseif(isset($item['recommendation_score']) && $item['recommendation_score'] > 0) bg-green-50 @endif">
-                            <h2 class="text-xl font-bold mb-2">{{ $item['dish_name'] }}</h2>
-                            <p class="text-gray-600">Precio: {{ $item['price'] }}</p>
-                            <p class="text-gray-600">Descripción: {{ $item['description'] ?? 'Sin descripción' }}</p>
-                            <p class="text-gray-600">Categoría: {{ $item['category'] ?? 'Sin categoría' }}</p>
+                        <div class="menu-item mb-4 p-4 rounded-lg shadow border 
+                            {{-- Aplicar estilo verde suave si es favorito --}}
+                            {{ $item['is_favorite'] ? 'bg-green-50 border-green-200' : 'bg-white border-gray-200' }}
+                            {{-- Aplicar estilo amarillo suave si tiene alérgenos --}}
+                            {{ $item['has_allergens'] ? 'border-yellow-200' : '' }}">
                             
-                            @if(!empty($item['allergens']))
-                                <p class="text-red-600 mt-2">
-                                    <span class="font-bold">Alérgenos:</span> 
-                                    {{ implode(', ', $item['allergens']) }}
-                                </p>
-                            @endif
+                            <h3 class="text-lg font-semibold mb-2 {{ $item['is_favorite'] ? 'text-green-700' : 'text-gray-900' }}">
+                                {{ $item['dish_name'] }}
+                            </h3>
+                            
+                            <div class="space-y-1">
+                                <p><span class="font-medium">Precio:</span> {{ $item['price'] }}</p>
+                                <p><span class="font-medium">Descripción:</span> {{ $item['description'] ?? 'Sin descripción' }}</p>
+                                <p><span class="font-medium">Categoría:</span> {{ $item['category'] ?? 'Sin categoría' }}</p>
+                                
+                                @if(!empty($item['allergens']))
+                                    <p class="text-yellow-700">
+                                        <span class="font-medium">Alérgenos:</span> 
+                                        {{ implode(', ', $item['allergens']) }}
+                                    </p>
+                                @endif
+                            </div>
 
-                            @if(isset($item['not_recommended']) && $item['not_recommended'])
-                                <p class="text-red-600 mt-2">⚠️ Este plato contiene ingredientes que no coinciden con tus restricciones dietéticas.</p>
-                            @endif
-
-                            @if(isset($item['recommendation_score']) && $item['recommendation_score'] > 0)
-                                <p class="text-green-600 mt-2">✨ Recomendado basado en tus preferencias</p>
-                            @endif
+                            <div class="mt-2 space-y-1">
+                                @if($item['is_favorite'])
+                                    <p class="text-green-600 text-sm">
+                                        ✨ Recomendado basado en tus preferencias
+                                    </p>
+                                @endif
+                                @if($item['has_allergens'])
+                                    <p class="text-yellow-600 text-sm">
+                                        ⚠️ Contiene alérgenos a tener en cuenta
+                                    </p>
+                                @endif
+                            </div>
                         </div>
                     @endforeach
                 </div>
