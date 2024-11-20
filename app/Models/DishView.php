@@ -87,6 +87,15 @@ class DishView extends Model
                     'views' => $view->views_count,
                     'last_viewed' => $view->last_viewed
                 ];
+            })
+            ->map(function($dish) {
+                return [
+                    'id' => $dish->id,
+                    'name' => $dish->name,
+                    'category' => $dish->category,
+                    'view_count' => $dish->view_count,
+                    'recommendation_score' => $dish->calculateRecommendationScore()
+                ];
             });
     }
 
@@ -98,6 +107,14 @@ class DishView extends Model
             ->groupBy('dish_id')
             ->orderByRaw('COUNT(*) DESC')
             ->limit($limit)
-            ->get();
+            ->get()
+            ->map(function($dish) {
+                return [
+                    'id' => $dish->id,
+                    'name' => $dish->name,
+                    'trending_score' => $dish->calculateTrendingScore(),
+                    'recent_views' => $dish->recent_views_count
+                ];
+            });
     }
 }

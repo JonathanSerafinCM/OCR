@@ -871,6 +871,68 @@ public function updatePreferences(Request $request)
         return redirect()->route('preferencias')
             ->with('status', 'preferences-updated');
     }
+
+    public function getMenuItems(Request $request)
+    {
+        $items = Menu::query();
+        
+        if ($request->has('category')) {
+            $items->where('category', $request->category);
+        }
+        
+        if ($request->has('price_range')) {
+            $range = explode('-', $request->price_range);
+            $items->whereBetween('price', $range);
+        }
+        
+        $menuItems = $items->get();
+        
+        // Get user preferences if authenticated
+        $userPreferences = $this->getUserPreferences(Auth::id());
+        
+        // Apply recommendations
+        $recommendedItems = $this->getRecommendedItems($menuItems->toArray(), $userPreferences);
+        
+        return response()->json([
+            'items' => $recommendedItems,
+            'preferences_applied' => !is_null($userPreferences)
+        ]);
+    }
+
+    public function trackDishView(Request $request)
+    {
+        $validated = $request->validate([
+            'dish_id' => 'required|exists:menus,id',
+        ]);
+
+        DishView::recordView($validated['dish_id'], Auth::id());
+
+        return response()->json(['message' => 'View tracked successfully']);
+    }
+
+    public function getPopularDishes(Request $request)
+    {
+        $timeframe = $request->input('timeframe', 24); // hours
+        $limit = $request->input('limit', 5);
+
+        $popularDishes = DishView::getTrendingDishes($timeframe, $limit);
+
+        return response()->json([
+            'popular_dishes' => $popularDishes,
+            'timeframe' => $timeframe
+        ]);
+    }
+
+    public function getUserPreferencesApi()
+    {
+        $preferences = UserPreference::where('user_id', Auth::id())->first();
+        
+        return response()->json([
+            'preferences' => $preferences ?? [],
+            'common_restrictions' => UserPreference::getCommonRestrictions(),
+            'popular_categories' => UserPreference::getPopularCategories()
+        ]);
+    }
 }
 
 
