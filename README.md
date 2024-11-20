@@ -2,26 +2,18 @@
 
 Esta documentación describe los cambios realizados en la API para implementar un sistema de recomendaciones personalizadas y cómo integrarlos en un frontend. 
 
-## Tabla de Contenidos
-1. [Requisitos de Autenticación](#requisitos-de-autenticación)  
-2. [Endpoints de la API](#endpoints-de-la-api)  
+## Tabla de Contenidos 
+1. [Endpoints de la API](#endpoints-de-la-api)  
    - [Procesar Menú](#procesar-menú)  
    - [Obtener Elementos del Menú](#obtener-elementos-del-menú)  
    - [Preferencias del Usuario](#preferencias-del-usuario)  
    - [Platos Populares](#platos-populares)  
    - [Filtrar Elementos del Menú](#filtrar-elementos-del-menú)  
    - [Calificar un Plato](#calificar-un-plato)  
-3. [Consideraciones](#consideraciones)  
+2. [Consideraciones](#consideraciones)  
 
 ---
 
-## Requisitos de Autenticación
-
-Todos los endpoints protegidos requieren autenticación utilizando **Sanctum** (tokens de API). Incluye el token en el encabezado `Authorization` de tus solicitudes:
-
-```
-Authorization: Bearer <your_api_token>
-```
 
 ---
 
