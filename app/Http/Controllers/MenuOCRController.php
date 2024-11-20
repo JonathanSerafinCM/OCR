@@ -685,7 +685,7 @@ EOT;
             }
         }
     
-        return array_unique($allergens);
+        return array_map('strtolower', array_unique($allergens));
     }
 
     private function getUserPreferences($userId = null)
@@ -717,44 +717,84 @@ EOT;
         $favoriteTags = $userPreferences['favorite_tags'] ?? [];
         $previousOrders = $userPreferences['order_history'] ?? [];
 
-        // Convert to collection for easier manipulation
-        $items = collect($menuItems)->map(function($item) use ($restrictions, $favoriteTags, $previousOrders) {
+        // Mapa de equivalencias entre restricciones dietéticas y alérgenos
+        $allergenEquivalence = [
+            'gluten' => ['gluten'],
+            'lácteos' => ['lácteos'],
+            'frutos secos' => ['frutos_secos'],
+            'pescado' => ['pescado'],
+            'mariscos' => ['pescado', 'crustáceos', 'moluscos'], // Agrega "pescado" aquí
+            'huevos' => ['huevos'],
+            // Agrega más restricciones si es necesario
+        ];
+
+        // Obtener la lista de alérgenos a excluir
+        $allergensToExclude = [];
+        foreach ($restrictions as $restriction) {
+            $normalizedRestriction = strtolower(trim($restriction));
+            if (isset($allergenEquivalence[$normalizedRestriction])) {
+                $allergensToExclude = array_merge($allergensToExclude, $allergenEquivalence[$normalizedRestriction]);
+            } else {
+                $allergensToExclude[] = $normalizedRestriction;
+            }
+        }
+
+        // Normalizar los alérgenos a excluir
+        $allergensToExclude = array_map('strtolower', $allergensToExclude);
+
+        // Filtrar los platillos
+        $items = collect($menuItems)->filter(function($item) use ($allergensToExclude, $favoriteTags) {
+            // Normalizar los alérgenos del platillo
+            $itemAllergens = array_map('strtolower', $item['allergens'] ?? []);
+
+            // Excluir platillos que contengan alérgenos restringidos
+            if (!empty(array_intersect($allergensToExclude, $itemAllergens))) {
+                return false;
+            }
+
+            // Lógica existente para categorías favoritas
+            if (!empty($favoriteTags)) {
+                // Normalizar la categoría del item y las categorías favoritas para la comparación
+                $itemCategory = strtolower(trim($item['category'] ?? ''));
+                $normalizedFavoriteTags = array_map(function($tag) {
+                    return strtolower(trim($tag));
+                }, $favoriteTags);
+
+                // Mapear categorías comunes
+                $categoryMap = [
+                    'entrante' => 'entradas',
+                    'principal' => 'carnes',
+                    'pescados y mariscos' => 'pescados',
+                    'postre' => 'postres'
+                ];
+
+                // Normalizar la categoría del item si existe en el mapeo
+                if (isset($categoryMap[$itemCategory])) {
+                    $itemCategory = $categoryMap[$itemCategory];
+                }
+
+                return in_array($itemCategory, $normalizedFavoriteTags);
+            }
+
+            return true; // Si no hay categorías favoritas, mostrar todos los platos no restringidos
+        })->map(function($item) use ($favoriteTags, $previousOrders) {
             $score = 0;
 
-            // Check dietary restrictions
-            if (!empty(array_intersect($restrictions, $item['allergens'] ?? []))) {
-                $item['not_recommended'] = true;
-                $score -= 10; // Heavy penalty for restricted items
+            // Puntuación basada en categoría
+            if (in_array(strtolower($item['category']), array_map('strtolower', $favoriteTags))) {
+                $score += 5; // Aumenta la puntuación de 3 a 5
             }
 
-            // Score based on category matches
-            if (in_array($item['category'], $favoriteTags)) {
-                $score += 3;
-            }
-
-            // Score based on previous orders
+            // Puntuación basada en pedidos previos
             if (in_array($item['dish_name'], $previousOrders)) {
                 $score += 2;
             }
 
-            // Add tags matching (if available)
-            $itemTags = $item['tags'] ?? [];
-            $matchingTags = array_intersect($itemTags, $favoriteTags);
-            $score += count($matchingTags) * 2;
-
             $item['recommendation_score'] = $score;
-            $item['personalized'] = true;
-
             return $item;
-        });
+        })->sortByDesc('recommendation_score');
 
-        // Sort by score and move restricted items to end
-        $sorted = $items->sortByDesc('recommendation_score')
-            ->sortBy(function ($item) {
-                return isset($item['not_recommended']) && $item['not_recommended'] ? 1 : 0;
-            });
-
-        return $sorted->values()->all();
+        return $items->values()->all();
     }
 
     public function filterMenuItems(Request $request)
