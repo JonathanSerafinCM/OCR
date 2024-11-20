@@ -86,27 +86,4 @@ class UserPreference extends Model
             ->limit($limit)
             ->get();
     }
-
-    public static function getRecommendationsForUser($userId, $limit = 10)
-    {
-        $preferences = self::where('user_id', $userId)->first();
-        if (!$preferences) {
-            return collect();
-        }
-
-        return Menu::whereHas('views')
-            ->whereNotIn('id', function($query) use ($userId) {
-                $query->select('dish_id')
-                    ->from('dish_views')
-                    ->where('user_id', $userId);
-            })
-            ->when($preferences->dietary_restrictions, function($query, $restrictions) {
-                $query->whereNotIn('allergens', $restrictions);
-            })
-            ->when($preferences->favorite_tags, function($query, $tags) {
-                $query->whereIn('category', $tags);
-            })
-            ->limit($limit)
-            ->get();
-    }
 }
