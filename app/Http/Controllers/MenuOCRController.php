@@ -742,47 +742,62 @@ EOT;
         // Normalizar los alérgenos a excluir
         $allergensToExclude = array_map('strtolower', $allergensToExclude);
 
-        // Filtrar los platillos
-        $items = collect($menuItems)->filter(function($item) use ($allergensToExclude, $favoriteTags) {
+        // Filtrar los platillos excluyendo los alérgenos restringidos
+        $items = collect($menuItems)->filter(function($item) use ($allergensToExclude) {
             // Normalizar los alérgenos del platillo
             $itemAllergens = array_map('strtolower', $item['allergens'] ?? []);
 
             // Excluir platillos que contengan alérgenos restringidos
-            if (!empty(array_intersect($allergensToExclude, $itemAllergens))) {
-                return false;
-            }
+            return empty(array_intersect($allergensToExclude, $itemAllergens));
+        });
 
-            // Lógica existente para categorías favoritas
-            if (!empty($favoriteTags)) {
-                // Normalizar la categoría del item y las categorías favoritas para la comparación
+        // Si después de filtrar por alérgenos no hay platillos, devolver vacío
+        if ($items->isEmpty()) {
+            return [];
+        }
+
+        // Aplicar filtrado por etiquetas favoritas si existen
+        if (!empty($favoriteTags)) {
+            $itemsByFavorites = $items->filter(function($item) use ($favoriteTags) {
                 $itemCategory = strtolower(trim($item['category'] ?? ''));
-                $normalizedFavoriteTags = array_map(function($tag) {
-                    return strtolower(trim($tag));
-                }, $favoriteTags);
 
                 // Mapear categorías comunes
                 $categoryMap = [
                     'entrante' => 'entradas',
+                    'entrantes' => 'entradas',
                     'principal' => 'carnes',
+                    'carne' => 'carnes',
                     'pescados y mariscos' => 'pescados',
-                    'postre' => 'postres'
+                    'pescado' => 'pescados',
+                    'ensalada' => 'ensaladas',
+                    'postre' => 'postres',
+                    // Agrega más mapeos si es necesario
                 ];
 
-                // Normalizar la categoría del item si existe en el mapeo
+                // Normalizar la categoría del item
                 if (isset($categoryMap[$itemCategory])) {
                     $itemCategory = $categoryMap[$itemCategory];
                 }
 
-                return in_array($itemCategory, $normalizedFavoriteTags);
-            }
+                $normalizedFavoriteTags = array_map('strtolower', $favoriteTags);
 
-            return true; // Si no hay categorías favoritas, mostrar todos los platos no restringidos
-        })->map(function($item) use ($favoriteTags, $previousOrders) {
+                return in_array($itemCategory, $normalizedFavoriteTags);
+            });
+
+            // Si hay platillos que coinciden con las etiquetas favoritas, usar esos
+            if ($itemsByFavorites->isNotEmpty()) {
+                $items = $itemsByFavorites;
+            }
+            // Si no hay coincidencias, continuar con los platillos filtrados solo por alérgenos
+        }
+
+        // Calcular puntuaciones de recomendación
+        $items = $items->map(function($item) use ($favoriteTags, $previousOrders) {
             $score = 0;
 
             // Puntuación basada en categoría
             if (in_array(strtolower($item['category']), array_map('strtolower', $favoriteTags))) {
-                $score += 5; // Aumenta la puntuación de 3 a 5
+                $score += 5;
             }
 
             // Puntuación basada en pedidos previos
