@@ -24,4 +24,9 @@ class Menu extends Model
     protected $casts = [
         'allergens' => 'array'
     ];
+
+    public function ratings()
+    {
+        return $this->hasMany(Rating::class, 'dish_id');
+    }
 }

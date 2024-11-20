@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 
 class DishView extends Model
 {
@@ -99,22 +100,13 @@ class DishView extends Model
             });
     }
 
-    public static function getTrendingDishes($hours = 24, $limit = 5)
+    public static function getTrendingDishes($timeframe = 24, $limit = 5)
     {
-        return self::select('dish_id')
-            ->with('dish')
-            ->where('viewed_at', '>=', now()->subHours($hours))
-            ->groupBy('dish_id')
-            ->orderByRaw('COUNT(*) DESC')
-            ->limit($limit)
-            ->get()
-            ->map(function($dish) {
-                return [
-                    'id' => $dish->id,
-                    'name' => $dish->name,
-                    'trending_score' => $dish->calculateTrendingScore(),
-                    'recent_views' => $dish->recent_views_count
-                ];
-            });
+        return self::select('dish_id', DB::raw('COUNT(*) as views'))
+                   ->where('created_at', '>=', now()->subHours($timeframe))
+                   ->groupBy('dish_id')
+                   ->orderByDesc('views')
+                   ->limit($limit)
+                   ->get();
     }
 }

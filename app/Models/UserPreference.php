@@ -33,14 +33,12 @@ class UserPreference extends Model
     /**
      * Add an item to order history
      */
-    public function addToOrderHistory(string $itemName)
+    public function addToOrderHistory($dishName)
     {
         $history = $this->order_history ?? [];
-        if (!in_array($itemName, $history)) {
-            $history[] = $itemName;
-            $this->order_history = $history;
-            $this->save();
-        }
+        $history[] = $dishName;
+        $this->order_history = array_unique($history);
+        $this->save();
     }
 
     /**
@@ -58,27 +56,35 @@ class UserPreference extends Model
 
     public static function getPopularCategories($limit = 5)
     {
-        return self::select('favorite_tags')
-            ->whereNotNull('favorite_tags')
-            ->get()
-            ->flatMap(function ($pref) {
-                return $pref->favorite_tags;
-            })
-            ->countBy()
-            ->sortDesc()
-            ->take($limit);
+        return [];
     }
 
     public static function getCommonRestrictions()
     {
-        return self::select('dietary_restrictions')
-            ->whereNotNull('dietary_restrictions')
-            ->get()
-            ->flatMap(function ($pref) {
-                return $pref->dietary_restrictions;
+        return [];
+    }
+
+    public static function getRecommendationsForUser($userId, $limit = 10)
+    {
+        $preferences = self::where('user_id', $userId)->first();
+        if (!$preferences) {
+            return collect();
+        }
+
+        return Menu::whereHas('views')
+            ->whereNotIn('id', function($query) use ($userId) {
+                $query->select('dish_id')
+                    ->from('dish_views')
+                    ->where('user_id', $userId);
             })
-            ->countBy()
-            ->sortDesc();
+            ->when($preferences->dietary_restrictions, function($query, $restrictions) {
+                $query->whereNotIn('allergens', $restrictions);
+            })
+            ->when($preferences->favorite_tags, function($query, $tags) {
+                $query->whereIn('category', $tags);
+            })
+            ->limit($limit)
+            ->get();
     }
 
     public static function getRecommendationsForUser($userId, $limit = 10)

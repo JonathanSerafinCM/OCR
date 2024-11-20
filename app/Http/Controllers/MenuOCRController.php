@@ -805,6 +805,32 @@ EOT;
             return [$item['is_favorite'], $item['recommendation_score']];
         })->values()->all();
     }
+
+public function rateDish(Request $request, $dishId)
+{
+    $validated = $request->validate([
+        'rating' => 'required|integer|between:1,5'
+    ]);
+
+    $rating = Rating::updateOrCreate(
+        [
+            'user_id' => Auth::id(),
+            'dish_id' => $dishId
+        ],
+        ['rating' => $validated['rating']]
+    );
+
+    // Update user preferences with this interaction
+    $dish = Menu::findOrFail($dishId);
+    $userPref = UserPreference::firstOrCreate(['user_id' => Auth::id()]);
+    $userPref->addToOrderHistory($dish->dish_name);
+
+    return response()->json([
+        'message' => 'Rating saved successfully',
+        'new_recommendations' => $this->getRecommendedItems(Menu::all()->toArray(), $this->getUserPreferences(Auth::id()))
+    ]);
+}
+
 public function updatePreferences(Request $request)
 {
     $validated = $request->validate([
@@ -844,6 +870,7 @@ public function updatePreferences(Request $request)
         $minPrice = $request->input('min_price', 0);
         $maxPrice = $request->input('max_price', 999999);
         $category = $request->input('category');
+        $restrictions = $request->input('restrictions', []);
         
         try {
             $query = Menu::query();
@@ -856,20 +883,37 @@ public function updatePreferences(Request $request)
                         ->whereRaw('CAST(REGEXP_REPLACE(price, "[^0-9.]", "") AS DECIMAL(10,2)) <= ?', [$maxPrice]);
                 });
             });
+
+            if ($category) {
+                $query->where('category', $category);
+            }
+
+            if (!empty($restrictions)) {
+                $query->where(function($q) use ($restrictions) {
+                    foreach ($restrictions as $restriction) {
+                        $q->whereJsonContains('allergens', $restriction);
+                    }
+                });
+            }
+
+            $menuItems = $query->get();
+
+            // Update user preferences
+            $preference = UserPreference::updateOrCreate(
+                ['user_id' => Auth::id()],
+                [
+                    'dietary_restrictions' => $request->input('restrictions', []),
+                    'favorite_tags' => $request->input('favorite_tags', [])
+                ]
+            );
+
+            return response()->json([
+                'filtered_items' => $menuItems,
+                'preferences_updated' => true
+            ]);
         } catch (\Exception $e) {
             return response()->json(['error' => 'An error occurred while filtering menu items'], 500);
         }
-
-        $preference = UserPreference::updateOrCreate(
-            ['user_id' => Auth::id()],
-            [
-                'dietary_restrictions' => $validated['dietary_restrictions'] ?? [],
-                'favorite_tags' => $validated['favorite_tags'] ?? [],
-            ]
-        );
-
-        return redirect()->route('preferencias')
-            ->with('status', 'preferences-updated');
     }
 
     public function getMenuItems(Request $request)

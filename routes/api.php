@@ -14,7 +14,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/menu/items', [MenuOCRController::class, 'getMenuItems']);
     
     // User preferences and recommendations
-    Route::get('/preferences', [MenuOCRController::class, 'getUserPreferencesApi']);
+    Route::post('/preferences/update', [MenuOCRController::class, 'updatePreferences']);
+    Route::get('/preferences', [MenuOCRController::class, 'showPreferences']);
+    Route::get('/preferences/api', [MenuOCRController::class, 'getUserPreferencesApi']);
     Route::post('/preferences', [MenuOCRController::class, 'updatePreferences']);
     Route::get('/menu/recommendations', [MenuOCRController::class, 'getRecommendations']);
     
@@ -24,4 +26,8 @@ Route::middleware('auth:sanctum')->group(function () {
     
     // Filtering
     Route::post('/menu/filter', [MenuOCRController::class, 'filterMenuItems']);
+    
+    // Rating endpoints
+    Route::post('/dishes/{dish}/rate', [MenuOCRController::class, 'rateDish']);
+    Route::get('/dishes/{dish}/rating', [MenuOCRController::class, 'getDishRating']);
 });
