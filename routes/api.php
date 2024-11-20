@@ -9,16 +9,19 @@ Route::post('/register', [AuthController::class, 'register']);
 
 // Protected routes
 Route::middleware('auth:sanctum')->group(function () {
-    // Menu routes
+    // Menu processing routes
     Route::post('/menu/process', [MenuOCRController::class, 'processMenu']);
     Route::get('/menu/items', [MenuOCRController::class, 'getMenuItems']);
-    Route::get('/menu/recommendations', [MenuOCRController::class, 'getRecommendations']);
     
-    // User preferences
+    // User preferences and recommendations
     Route::get('/preferences', [MenuOCRController::class, 'getUserPreferencesApi']);
     Route::post('/preferences', [MenuOCRController::class, 'updatePreferences']);
+    Route::get('/menu/recommendations', [MenuOCRController::class, 'getRecommendations']);
     
-    // Interaction tracking
-    Route::post('/menu/track-view', [MenuOCRController::class, 'trackDishView']);
+    // Tracking and analytics
+    Route::post('/dish/view', [MenuOCRController::class, 'recordDishView']);
     Route::get('/menu/popular', [MenuOCRController::class, 'getPopularDishes']);
+    
+    // Filtering
+    Route::post('/menu/filter', [MenuOCRController::class, 'filterMenuItems']);
 });
