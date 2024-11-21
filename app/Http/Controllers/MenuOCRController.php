@@ -954,27 +954,77 @@ public function updatePreferences(Request $request)
         return response()->json(['message' => 'View tracked successfully']);
     }
 
-    public function getPopularDishes(Request $request)
-    {
-        $timeframe = $request->input('timeframe', 24); // hours
-        $limit = $request->input('limit', 5);
-
-        $popularDishes = DishView::getTrendingDishes($timeframe, $limit);
-
-        return response()->json([
-            'popular_dishes' => $popularDishes,
-            'timeframe' => $timeframe
-        ]);
-    }
-
     public function getUserPreferencesApi()
     {
         $preferences = UserPreference::where('user_id', Auth::id())->first();
         
         return response()->json([
-            'preferences' => $preferences ?? [],
+            'preferences' => [
+                'dietary_restrictions' => $preferences->dietary_restrictions ?? [],
+                'favorite_tags' => $preferences->favorite_tags ?? [],
+                'historial' => $preferences->order_history ?? []
+            ],
             'common_restrictions' => UserPreference::getCommonRestrictions(),
             'popular_categories' => UserPreference::getPopularCategories()
+        ]);
+    }
+
+    public function getDishRating($dishId)
+    {
+        $userRating = Rating::where('user_id', Auth::id())
+            ->where('dish_id', $dishId)
+            ->value('rating');
+
+        $averageRating = Rating::where('dish_id', $dishId)
+            ->avg('rating');
+
+        return response()->json([
+            'user_rating' => $userRating,
+            'average_rating' => round($averageRating, 1)
+        ]);
+    }
+
+    public function recordDishView(Request $request)
+    {
+        $validated = $request->validate([
+            'dish_id' => 'required|exists:menus,id'
+        ]);
+
+        DishView::create([
+            'user_id' => Auth::id(),
+            'dish_id' => $validated['dish_id'],
+            'viewed_at' => now()
+        ]);
+
+        return response()->json(['message' => 'View recorded successfully']);
+    }
+
+    public function getPopularDishes(Request $request)
+    {
+        $timeframe = $request->input('timeframe', 24);
+        $limit = $request->input('limit', 5);
+
+        $popularDishes = DishView::select('dish_id')
+            ->where('viewed_at', '>=', now()->subHours($timeframe))
+            ->groupBy('dish_id')
+            ->withCount('views as times_viewed')
+            ->with(['dish' => function($query) {
+                $query->withAvg('ratings as average_rating', 'rating');
+            }])
+            ->orderByDesc('times_viewed')
+            ->limit($limit)
+            ->get()
+            ->map(function($view) {
+                return [
+                    'nombre' => $view->dish->dish_name,
+                    'veces_visto' => $view->times_viewed,
+                    'puntuación' => round($view->dish->average_rating, 1)
+                ];
+            });
+
+        return response()->json([
+            'popular_dishes' => $popularDishes,
+            'timeframe' => $timeframe
         ]);
     }
 }
